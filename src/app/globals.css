@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+/* ── Farpot brand palette (Farcaster-purple, direction B) ─────────── */
+@theme {
+  --color-navy: #17101f;
+  --color-navy-deep: #1e1429;
+  --color-navy-card: #241833;
+  --color-gold: #ffce2e;
+  --color-gold-deep: #f5a623;
+  --color-gold-light: #ffe9a8;
+  --color-royal: #855dcd;
+  --color-win: #e5383b;
+  --color-cream: #f4eefb;
+  --color-mut: #a895c4;
+  --color-wins-green: #34d399;
+
+  --font-display: var(--font-anton);
+  --font-heading: var(--font-archivo);
+  --font-sans: var(--font-inter);
+}
+
+/* Retint OnchainKit's wallet UI (Connect button etc.) to Farcaster purple */
+:root {
+  --ock-primary: #855dcd;
+  --ock-primary-hover: #9b78e0;
+  --ock-primary-active: #6f4ab8;
+  --ock-primary-washed: rgba(133, 93, 205, 0.22);
+}
+
+body {
+  background:
+    radial-gradient(1100px 600px at 50% -8%, rgba(133, 93, 205, 0.38) 0%, transparent 58%),
+    linear-gradient(180deg, var(--color-navy-deep), #0d0916 80%);
+  color: var(--color-cream);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Display type: bold lottery italic ────────────────────────────── */
+.display {
+  font-family: var(--font-anton), sans-serif;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  transform: skewX(-7deg);
+  display: inline-block;
+}
+.gold-text {
+  background: linear-gradient(180deg, #fff0b8 0%, #ffd56b 46%, #f3b43c 56%, #c5840e 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-stroke: 1.2px rgba(6, 16, 43, 0.5);
+  filter: drop-shadow(0 2px 0 rgba(6, 16, 43, 0.4)) drop-shadow(0 0 16px rgba(255, 206, 46, 0.3));
+}
+.white-text {
+  color: #fff;
+  -webkit-text-stroke: 1.2px rgba(23, 16, 31, 0.55);
+  filter: drop-shadow(0 2px 0 rgba(23, 16, 31, 0.45));
+}
+
+/* ── Lottery balls ────────────────────────────────────────────────── */
+.brand-ball {
+  position: relative;
+  background: radial-gradient(circle at 36% 30%, #fff, #e9e2f5 55%, #c9bce4);
+  color: var(--color-navy-deep);
+  box-shadow: inset 0 -5px 10px rgba(96, 70, 150, 0.35), 0 6px 12px -5px rgba(0, 0, 0, 0.55);
+}
+.brand-ball-gold {
+  background: radial-gradient(circle at 36% 30%, #fff3c4, var(--color-gold) 55%, var(--color-gold-deep));
+  color: var(--color-navy-deep);
+}
+.brand-ball-empty {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-mut);
+}
+
+/* ── Gold buy button with shine sweep ─────────────────────────────── */
+.btn-gold {
+  position: relative;
+  overflow: hidden;
+  color: #1a1206;
+  background: linear-gradient(180deg, #ffe9a8, #ffce2e 45%, #f5a623);
+  box-shadow: 0 10px 22px -8px rgba(255, 206, 46, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+.btn-gold::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -120%;
+  width: 55%;
+  height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.7), transparent);
+  transform: skewX(-20deg);
+  animation: sweep 3.4s ease-in-out infinite;
+}
+@keyframes sweep {
+  0% { left: -120%; }
+  55%, 100% { left: 150%; }
+}
+
+.pulse-gold {
+  animation: pulse-gold 2.6s ease-in-out infinite;
+}
+@keyframes pulse-gold {
+  0%, 100% { filter: drop-shadow(0 2px 0 rgba(6, 16, 43, 0.4)) drop-shadow(0 0 0 rgba(255, 206, 46, 0)); }
+  50% { filter: drop-shadow(0 2px 0 rgba(6, 16, 43, 0.4)) drop-shadow(0 0 22px rgba(255, 206, 46, 0.55)); }
+}
+
+/* ── Number reveal animation (quick-pick post-purchase) ───────────── */
+@keyframes numberReveal {
+  0% { opacity: 0; transform: scale(0.5) rotate(-180deg); }
+  60% { opacity: 1; transform: scale(1.15) rotate(10deg); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+
+/* Respect reduced-motion: skip animations */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
