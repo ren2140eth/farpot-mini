@@ -41,9 +41,17 @@ yarn-error.log*
 # vercel
 .vercel
 
-# internal agent build notes (kept local, not published)
+# internal / non-published material — public repo is prod code only.
+# Keep briefs, process notes, design mockups, agent instructions, personal
+# info, and one-off proof/scratch scripts OUT of the open-source repo.
 AGENTS.md
 CLAUDE.md
+/branding/
+/docs/briefs/
+*-proof.mjs
+*.internal.*
+NOTES.md
+TODO.md
 
 # typescript
 *.tsbuildinfo
