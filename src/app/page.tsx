@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { useAccount, useConfig, useReadContract } from "wagmi";
@@ -9,6 +9,7 @@ import { stringToHex, formatUnits, encodeFunctionData } from "viem";
 import { Connected } from "@coinbase/onchainkit";
 import { ConnectWallet } from "@coinbase/onchainkit/wallet";
 import { useMiniKit, useComposeCast } from "@coinbase/onchainkit/minikit";
+import { sdk } from "@farcaster/miniapp-sdk";
 import {
   JACKPOT_ADDRESS,
   RANDOM_TICKET_BUYER_ADDRESS,
@@ -55,9 +56,32 @@ function ConfettiBurst() {
       {Array.from({ length: 28 }, (_, index) => (
         <span key={index} className="confetti-piece" />
       ))}
+      {/* A few gold stars in the mix — echoes the FAR★POT wordmark */}
+      {Array.from({ length: 6 }, (_, index) => (
+        <span key={`star-${index}`} className="confetti-piece confetti-star">
+          ⭐
+        </span>
+      ))}
     </div>
   );
 }
+
+// ── Haptics — physical feedback via the mini-app host ───────────────
+// Best-effort only: outside a mini-app host (plain browser) the SDK call may
+// reject or throw, and either way the app must carry on silently.
+function tryHaptic(fire: () => Promise<void>) {
+  try {
+    fire().catch(() => {});
+  } catch {
+    /* not in a mini-app host */
+  }
+}
+const haptics = {
+  select: () => tryHaptic(() => sdk.haptics.selectionChanged()),
+  impact: () => tryHaptic(() => sdk.haptics.impactOccurred("medium")),
+  success: () => tryHaptic(() => sdk.haptics.notificationOccurred("success")),
+  error: () => tryHaptic(() => sdk.haptics.notificationOccurred("error")),
+};
 
 // ── Subscription types ───────────────────────────────────────────────
 
@@ -150,6 +174,14 @@ function formatUSDC(value: bigint): string {
   return formatUnits(value, USDC_DECIMALS);
 }
 
+// Jackpot odds for the current game: C(ballMax, 5) × bonusballMax. Computed
+// from live drawing state so the copy can never drift from the real game.
+function jackpotOdds(ballMax: number, bonusballMax: number): number {
+  let combos = 1;
+  for (let i = 0; i < 5; i++) combos = (combos * (ballMax - i)) / (i + 1);
+  return Math.round(combos) * bonusballMax;
+}
+
 // The headline "jackpot" is the top prize tier (match all 5 + bonusball) — NOT
 // prize_pool, which is the full multi-tier pot (~5x larger) and overstates what a
 // player actually wins. prize_tiers is only populated on settled rounds, but the
@@ -185,6 +217,31 @@ function formatDateTime(iso: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// ── "The Sweat" — first-view staggered results check ────────────────
+// A newly settled ticket reveals its matches one ball at a time, once. Seen
+// ticket ids are remembered locally so the drama never replays.
+const SWEAT_SEEN_KEY = "farpot-sweated-tickets";
+
+function getSweatedIds(): Set<string> {
+  try {
+    return new Set(
+      JSON.parse(localStorage.getItem(SWEAT_SEEN_KEY) ?? "[]") as string[],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function markSweated(ids: string[]) {
+  try {
+    const seen = getSweatedIds();
+    ids.forEach((id) => seen.add(id));
+    localStorage.setItem(SWEAT_SEEN_KEY, JSON.stringify([...seen].slice(-200)));
+  } catch {
+    /* storage unavailable (private mode) — the reveal just replays next visit */
+  }
 }
 
 // ── API fetch helpers ────────────────────────────────────────────────
@@ -248,6 +305,156 @@ interface SearchUserResult {
   fid: number;
   username: string;
   verified_address: `0x${string}` | null;
+}
+
+// ── Odometer jackpot headline ──────────────────────────────────────
+// Digits roll into place mechanically instead of swapping as text. The final
+// resting value is always the real API value — the roll is presentation only.
+const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+function Odometer({ value }: { value: number }) {
+  const str = Math.round(value).toLocaleString("en-US");
+  // First paint renders every strip at 0; arming on the next frame transitions
+  // each digit to its target so the number visibly rolls in on mount.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setArmed(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+  return (
+    <span className="odometer" role="text" aria-label={`$${str}`}>
+      <span aria-hidden="true">$</span>
+      {str.split("").map((ch, i) =>
+        /\d/.test(ch) ? (
+          <span key={`${str.length}-${i}`} className="odo-col" aria-hidden="true">
+            <span
+              className="odo-strip"
+              style={{ transform: `translateY(${armed ? -Number(ch) : 0}em)` }}
+            >
+              {ODO_DIGITS.map((d) => (
+                <b key={d}>{d}</b>
+              ))}
+            </span>
+          </span>
+        ) : (
+          <span key={`${str.length}-${i}`} aria-hidden="true">
+            {ch}
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
+// ── Scratch foil — post-buy reveal of quick-pick numbers ───────────
+// Mounted over the ticket preview once the buy succeeds. The numbers under
+// the foil are whatever the reveal flow shows (still cycling until the API
+// confirms, then settled), so scratching never fabricates a result.
+// Reduced-motion (or double-click) reveals on a single tap.
+function ScratchFoil({ onRevealed }: { onRevealed: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const doneRef = useRef(false);
+  const movesRef = useRef(0);
+  const scratchingRef = useRef(false);
+  const [fading, setFading] = useState(false);
+
+  const reveal = useCallback(() => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    setFading(true);
+    setTimeout(onRevealed, 450);
+  }, [onRevealed]);
+
+  // Paint the gold foil once, at device-pixel resolution
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    const g = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    g.addColorStop(0, "#ffd94f");
+    g.addColorStop(0.55, "#e2ad0b");
+    g.addColorStop(1, "#c8920a");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+    ctx.lineWidth = 6 * dpr;
+    for (let x = -canvas.height; x < canvas.width; x += 34 * dpr) {
+      ctx.beginPath();
+      ctx.moveTo(x, canvas.height + 8);
+      ctx.lineTo(x + canvas.height, -8);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "rgba(63, 31, 104, 0.9)";
+    ctx.font = `900 ${Math.round(12 * dpr)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("SCRATCH TO REVEAL ✦", canvas.width / 2, canvas.height / 2);
+  }, []);
+
+  const checkCleared = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx || doneRef.current) return;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let clear = 0;
+    let total = 0;
+    for (let i = 3; i < data.length; i += 64) {
+      total++;
+      if (data[i] < 40) clear++;
+    }
+    if (total > 0 && clear / total > 0.5) reveal();
+  }, [reveal]);
+
+  const scratchAt = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const r = canvas.getBoundingClientRect();
+    if (r.width === 0) return;
+    const scale = canvas.width / r.width;
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.beginPath();
+    ctx.arc(
+      (e.clientX - r.left) * scale,
+      (e.clientY - r.top) * scale,
+      20 * scale,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+    movesRef.current += 1;
+    if (movesRef.current % 10 === 0) checkCleared();
+  };
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className={`scratch-foil ${fading ? "scratch-foil-cleared" : ""}`}
+      role="button"
+      aria-label="Scratch to reveal your numbers (double-tap to reveal instantly)"
+      onDoubleClick={reveal}
+      onPointerDown={(e) => {
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          reveal();
+          return;
+        }
+        scratchingRef.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        scratchAt(e);
+      }}
+      onPointerMove={(e) => {
+        if (scratchingRef.current) scratchAt(e);
+      }}
+      onPointerUp={() => {
+        scratchingRef.current = false;
+        checkCleared();
+      }}
+    />
+  );
 }
 
 // ── Shared FAR ★ POT lockup from the approved brand mockup ─────────
@@ -468,12 +675,31 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [isShuffling, drawingState]);
 
+  // ── Scratch foil derived state ────────────────────────────────────
+  // The foil covers the ticket preview once a quick-pick buy succeeds;
+  // scratching it off is the reveal. Reset at buy start and in handleReset —
+  // every path into a fresh success runs through one of those.
+  const [scratched, setScratched] = useState(false);
+  const showFoil = mode === "quick" && buyPhase === "success" && !scratched;
+
   // ── Countdown timer ──────────────────────────────────────────────
+  // isGoldenHour: final hour before the draw (and the draw itself) flips the
+  // jackpot card into its night look — urgency you can feel, not read.
+  const [isGoldenHour, setIsGoldenHour] = useState(false);
   useEffect(() => {
     if (!drawingState) return;
-    const tick = () => setCountdown(formatCountdown(Number(drawingState.drawingTime)));
-    tick();
-    const interval = setInterval(tick, 1_000);
+    const tickClock = () =>
+      setCountdown(formatCountdown(Number(drawingState.drawingTime)));
+    const tickGolden = () =>
+      setIsGoldenHour(
+        Number(drawingState.drawingTime) * 1000 - Date.now() < 3_600_000,
+      );
+    tickClock();
+    tickGolden();
+    const interval = setInterval(() => {
+      tickClock();
+      tickGolden();
+    }, 1_000);
     return () => clearInterval(interval);
   }, [drawingState]);
 
@@ -656,6 +882,7 @@ export default function Home() {
 
   const toggleBall = useCallback(
     (num: number) => {
+      haptics.select();
       const isSelected = selection.normals.includes(num);
       const newNormals = isSelected
         ? selection.normals.filter((n) => n !== num)
@@ -669,6 +896,7 @@ export default function Home() {
 
   const toggleBonus = useCallback(
     (num: number) => {
+      haptics.select();
       setSelection({
         ...selection,
         bonusball: selection.bonusball === num ? 0 : num,
@@ -691,8 +919,11 @@ export default function Home() {
     // Determine recipient: gift address if in gift mode, otherwise buyer's address
     const recipient: `0x${string}` = giftState.address ?? address;
 
+    haptics.impact();
+
     try {
       setErrorMessage("");
+      setScratched(false);
 
       // Step 1: Approve USDC spending if needed
       if (needsApproval) {
@@ -792,6 +1023,7 @@ export default function Home() {
       }
 
       setBuyPhase("success");
+      haptics.success();
       // Refetch on-chain reads so balance + jackpot update immediately
       refetchUsdcBalance();
       refetchDrawingState();
@@ -851,6 +1083,7 @@ export default function Home() {
       // — hard revert / OOG. The tx definitely failed and funds are safe.
       const reverted = raw === "REVERTED";
       setBuyPhase("error");
+      haptics.error();
       // Gift buys can fail if the recipient's wallet can't receive ticket NFTs.
       // Surface that possibility only on a real failure (not as an upfront block —
       // most smart-contract wallets DO receive fine, so a pre-warning would be noise).
@@ -873,22 +1106,29 @@ export default function Home() {
     setResolvedQuickPick(null);
     setIsShuffling(false);
     setQuickPickPending(false);
+    setScratched(false);
   }, []);
 
   // ── Social proof: recent rounds (public, no wallet needed) ────────
   // Brief item 3 — ticket ticker + recent wins strip + fairness line
   const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
 
-  // Fetch recent settled rounds on mount for social proof (public API — no auth)
+  // Fetch recent settled rounds for social proof (public API — no auth).
+  // Re-poll every 60s so the headline jackpot rolls to a fresh value when a
+  // round settles while the app is open (the Odometer animates the change).
   useEffect(() => {
-    fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
-      if (res) {
-        const settled = res.data.filter((r) => r.status === "settled");
-        setRecentRounds(settled);
-        const jackpot = topTierPayoutUsd(settled[0]);
-        if (jackpot != null) setHeadlineJackpotUsd(jackpot);
-      }
-    });
+    const pull = () =>
+      fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
+        if (res) {
+          const settled = res.data.filter((r) => r.status === "settled");
+          setRecentRounds(settled);
+          const jackpot = topTierPayoutUsd(settled[0]);
+          if (jackpot != null) setHeadlineJackpotUsd(jackpot);
+        }
+      });
+    pull();
+    const interval = setInterval(pull, 60_000);
+    return () => clearInterval(interval);
   }, []);
 
   // ── Subscription allowance (for recurring mode) ────────────────────
@@ -1075,6 +1315,27 @@ export default function Home() {
     [claimableWins],
   );
 
+  // ── The Sweat: stagger-reveal a freshly settled ticket ───────────
+  // sweatStep counts revealed balls: 0..4 normals, 5 bonus, 6 verdict shown.
+  const [sweatTicketId, setSweatTicketId] = useState<string | null>(null);
+  const [sweatStep, setSweatStep] = useState(0);
+  const sweatInProgress = sweatTicketId !== null && sweatStep < 7;
+
+  // Called with freshly fetched tickets; decides whether a sweat reveal runs.
+  const maybeStartSweat = useCallback((tickets: ApiTicket[]) => {
+    const settled = tickets.filter((t) => t.matched_normals !== null);
+    if (settled.length === 0) return;
+    const seen = getSweatedIds();
+    // Only the NEWEST settled ticket ever animates; everything settled is
+    // marked seen so older tickets render instantly, forever.
+    const fresh = seen.has(settled[0].id) ? null : settled[0];
+    markSweated(settled.map((t) => t.id));
+    if (!fresh) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    setSweatTicketId(fresh.id);
+    setSweatStep(0);
+  }, []);
+
   // ── Results tab fetch (brief item 4: extend to initial load) ────
   // Fetch rounds on mount for social proof; fetch user tickets only when connected + Results visible.
   useEffect(() => {
@@ -1084,10 +1345,22 @@ export default function Home() {
       isConnected && address ? fetchApi<ApiTicket>(`/wallets/${address}/tickets?limit=20`) : null,
     ]).then(([roundsRes, ticketsRes]) => {
       if (roundsRes) setPastRounds(roundsRes.data.filter((r) => r.status === "settled"));
-      if (ticketsRes) setUserTickets(ticketsRes.data);
+      if (ticketsRes) {
+        setUserTickets(ticketsRes.data);
+        maybeStartSweat(ticketsRes.data);
+      }
       setLoadingResults(false);
     });
-  }, [isConnected, address, resultsRefresh, activeTab]);
+  }, [isConnected, address, resultsRefresh, activeTab, maybeStartSweat]);
+
+  useEffect(() => {
+    if (sweatTicketId === null || sweatStep >= 7) return;
+    const t = setTimeout(
+      () => setSweatStep((s) => s + 1),
+      sweatStep === 0 ? 750 : 620,
+    );
+    return () => clearTimeout(t);
+  }, [sweatTicketId, sweatStep]);
 
   // ── Claim handler ────────────────────────────────────────────────
   const handleClaim = useCallback(
@@ -1118,6 +1391,7 @@ export default function Home() {
         setLastClaimedAmount(claimedAmount);
         setLastClaimedTickets(tickets);
         setClaimPhase("success");
+        haptics.success();
         // Refetch on-chain reads so balance updates immediately
         refetchUsdcBalance();
         setResultsRefresh((n) => n + 1); // re-pull tickets so they show as claimed
@@ -1125,6 +1399,7 @@ export default function Home() {
         const raw = err instanceof Error ? err.message : String(err);
         const rejected = /user rejected|user denied|rejected the request/i.test(raw);
         setClaimPhase("error");
+        haptics.error();
         setClaimError(
           rejected
             ? "Claim cancelled."
@@ -1196,22 +1471,21 @@ export default function Home() {
             </button>
           )}
 
-          {/* Jackpot info card — clean flagship surface with lottery accents */}
-          <div className="jackpot-card rounded-3xl p-6 space-y-5">
+          {/* Jackpot info card — clean flagship surface with lottery accents.
+              Final hour before the draw flips it into golden-hour night mode. */}
+          <div className={`jackpot-card rounded-3xl p-6 space-y-5 ${isGoldenHour ? "jackpot-golden" : ""}`}>
             <div className="text-center">
               <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
                 Today&apos;s jackpot
               </p>
               <p className="display gold-text pulse-gold text-6xl mt-2 tabular-nums">
-                {headlineJackpotUsd != null
-                  ? `$${headlineJackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-                  : "…"}
+                {headlineJackpotUsd != null ? <Odometer value={headlineJackpotUsd} /> : "…"}
               </p>
             </div>
             <div className="grid grid-cols-3 gap-4 text-center">
               <div>
                 <p className="text-mut text-[10px] uppercase tracking-wider">Draws In</p>
-                <p className="text-royal font-heading font-extrabold text-lg">{countdown}</p>
+                <p className="jackpot-countdown text-royal font-heading font-extrabold text-lg">{countdown}</p>
               </div>
               <div>
                 <p className="text-mut text-[10px] uppercase tracking-wider">Ticket</p>
@@ -1230,6 +1504,9 @@ export default function Home() {
                 </p>
               </div>
             </div>
+            {isGoldenHour && (
+              <p className="golden-hour-note">⭐ Golden hour — the draw is close</p>
+            )}
           </div>
 
           {/* Brief item 3a: ticket-count pill ticker from most recent settled round */}
@@ -1378,7 +1655,7 @@ export default function Home() {
                         disabled={selection.normals.length >= 5 && !selected}
                         className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
                           selected
-                            ? "brand-ball ring-2 ring-coral"
+                            ? "brand-ball ring-2 ring-coral ball-pop"
                             : "brand-ball-empty hover:bg-white/10"
                         } disabled:opacity-30`}
                       >
@@ -1407,7 +1684,7 @@ export default function Home() {
                         onClick={() => toggleBonus(num)}
                         className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
                           selected
-                            ? "brand-ball-gold ring-2 ring-gold-light"
+                            ? "brand-ball-gold ring-2 ring-gold-light ball-pop"
                             : "brand-ball-empty hover:bg-white/10"
                         }`}
                       >
@@ -1468,6 +1745,10 @@ export default function Home() {
                     : "Quick Pick"}
                 </button>
               )}
+              <p className="relative z-10 -mt-3 text-center text-[10px] text-white/60">
+                1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()} for
+                the jackpot — someone&apos;s gotta win 🍀
+              </p>
             </div>
           )}
 
@@ -1545,6 +1826,11 @@ export default function Home() {
                   All {quantity} tickets will carry these same numbers
                 </p>
               )}
+
+              {/* The Scratcher: gold foil over the freshly-minted ticket. The
+                  numbers underneath keep resolving as usual; scratching (or a
+                  tap, for reduced motion) is what reveals them. */}
+              {showFoil && <ScratchFoil onRevealed={() => setScratched(true)} />}
             </div>
           ) : null}
 
@@ -2165,8 +2451,9 @@ export default function Home() {
               </div>
             )}
 
-            {/* Claim-all banner — appears when there are unclaimed winnings */}
-            {claimableWins.length > 0 && (
+            {/* Claim-all banner — appears when there are unclaimed winnings.
+                Held back while a sweat reveal is running so it can't spoil it. */}
+            {claimableWins.length > 0 && !sweatInProgress && (
               <div className="mb-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
@@ -2227,21 +2514,27 @@ export default function Home() {
                   const bonusHit =
                     ticket.bonusball_match ??
                     (winning ? winning.bonusball === ticket.bonusball : false);
+                  // The Sweat: this ticket's balls reveal one at a time on
+                  // first view. Every other ticket renders fully, instantly.
+                  const isSweating = ticket.id === sweatTicketId;
+                  const ballRevealed = (i: number) => !isSweating || sweatStep > i;
+                  const sweatDone = !isSweating || sweatStep >= 7;
 
                   return (
                     <div
                       key={ticket.id}
-                      className={`rounded-xl border p-4 space-y-2 ${
-                        won
+                      className={`relative rounded-xl border p-4 space-y-2 ${
+                        won && sweatDone
                           ? "border-emerald-500/40 bg-emerald-500/5"
                           : "border-white/10 bg-navy-card/40"
                       }`}
                     >
+                      {isSweating && sweatDone && won && <ConfettiBurst />}
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-mut">
                           Round #{ticket.round_id} · {formatDateTime(ticket.created_at)}
                         </span>
-                        {won && (
+                        {won && sweatDone && (
                           <span className="text-xs font-medium text-emerald-400 flex items-center gap-2">
                             Won ${formatApiAmount(ticket.winnings_amount)} USDC
                             {isClaimed ? (
@@ -2259,18 +2552,21 @@ export default function Home() {
                         )}
                       </div>
 
-                      {/* Ticket numbers */}
+                      {/* Ticket numbers — unrevealed sweat balls keep the
+                          "pending" look until their turn comes up */}
                       <div className="flex items-center gap-1.5 flex-wrap">
                         {ticket.normals.map((n, i) => (
                           <span
                             key={i}
                             className={`w-7 h-7 rounded-full text-xs font-heading font-extrabold flex items-center justify-center ${
-                              isMatch(n)
+                              !ballRevealed(i)
+                                ? "bg-royal/25 text-cream"
+                                : isMatch(n)
                                 ? "bg-emerald-500 text-black"
                                 : hasResult
                                 ? "brand-ball-empty"
                                 : "bg-royal/25 text-cream"
-                            }`}
+                            } ${isSweating && ballRevealed(i) ? "sweat-flip" : ""}`}
                           >
                             {n}
                           </span>
@@ -2278,23 +2574,43 @@ export default function Home() {
                         <span className="text-mut/70">+</span>
                         <span
                           className={`w-7 h-7 rounded-full text-xs font-heading font-extrabold flex items-center justify-center ${
-                            bonusHit
+                            !ballRevealed(5)
+                              ? "bg-gold/25 text-navy"
+                              : bonusHit
                               ? "brand-ball-gold"
                               : hasResult
                               ? "brand-ball-empty"
                               : "bg-gold/25 text-navy"
-                          }`}
+                          } ${isSweating && ballRevealed(5) ? "sweat-flip" : ""}`}
                         >
                           {ticket.bonusball}
                         </span>
                       </div>
 
                       {hasResult ? (
-                        <span className="text-xs text-mut">
-                          {ticket.matched_normals}/5 matched
-                          {bonusHit && " + bonus ⭐"}
-                          {!won && " · no win"}
-                        </span>
+                        !sweatDone ? (
+                          <span className="text-xs text-mut">
+                            Checking your numbers…
+                          </span>
+                        ) : isSweating ? (
+                          <span
+                            className={`sweat-verdict block text-xs font-semibold ${
+                              won ? "text-emerald-500" : "text-mut"
+                            }`}
+                          >
+                            {won
+                              ? `🎉 ${ticket.matched_normals}/5${bonusHit ? " + bonus ⭐" : ""} — you won $${formatApiAmount(ticket.winnings_amount)}!`
+                              : (ticket.matched_normals ?? 0) >= 2 || bonusHit
+                              ? `So close — ${ticket.matched_normals}/5 matched${bonusHit ? " + bonus ⭐" : ""}. Run it back?`
+                              : "Not this round — the next draw awaits 🍀"}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-mut">
+                            {ticket.matched_normals}/5 matched
+                            {bonusHit && " + bonus ⭐"}
+                            {!won && " · no win"}
+                          </span>
+                        )
                       ) : (
                         <span className="text-xs text-mut">Pending draw</span>
                       )}
