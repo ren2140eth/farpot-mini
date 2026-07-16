@@ -44,12 +44,12 @@ body {
   display: inline-block;
 }
 .gold-text {
-  background: linear-gradient(180deg, #513269 0%, #34204f 100%);
+  background: linear-gradient(180deg, #ffd94f 0%, #e2ad0b 72%, #b77f00 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
   -webkit-text-stroke: 0;
-  filter: none;
+  filter: drop-shadow(0 3px 7px rgba(219, 169, 20, 0.22));
 }
 .white-text {
   color: #f06a4f;
@@ -104,8 +104,8 @@ body {
   animation: pulse-gold 3.2s ease-in-out infinite;
 }
 @keyframes pulse-gold {
-  0%, 100% { filter: none; }
-  50% { filter: drop-shadow(0 8px 18px rgba(133, 93, 205, 0.16)); }
+  0%, 100% { filter: drop-shadow(0 3px 7px rgba(219, 169, 20, 0.22)); }
+  50% { filter: drop-shadow(0 8px 18px rgba(219, 169, 20, 0.34)); }
 }
 
 .app-shell { min-height: 100%; }
@@ -126,6 +126,15 @@ body {
 .segmented-active { background: linear-gradient(135deg, #ff8066, #f06a4f); color: #fff; box-shadow: 0 5px 12px rgba(240,106,79,.22); }
 .soft-panel { background: #fff; border: 1px solid #e1e4ec; box-shadow: 0 8px 24px rgba(19,36,90,.05); }
 
+.number-ticket-preview {
+  color: #fff;
+  background:
+    radial-gradient(circle at 88% 15%, rgba(255, 212, 71, 0.18), transparent 28%),
+    linear-gradient(145deg, #3f1f68 0%, #61349a 54%, #7548b5 100%);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 14px 26px -14px rgba(63, 31, 104, 0.72), inset 0 1px 0 rgba(255,255,255,.16);
+}
+
 .quick-pick-tab { position: relative; }
 .quick-pick-tab-active {
   color: #fff;
@@ -140,75 +149,48 @@ body {
   overflow: hidden;
   display: grid;
   justify-items: center;
-  gap: 14px;
-  padding: 24px 20px 20px;
+  gap: 20px;
+  padding: 28px 22px 22px;
   border-radius: 22px;
   color: #fff;
-  background:
-    radial-gradient(circle at 85% 10%, rgba(255, 207, 61, 0.32), transparent 26%),
-    linear-gradient(145deg, #4d267d 0%, #7442bc 52%, #9567dd 100%);
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: linear-gradient(145deg, #44216f 0%, #63379a 58%, #7548b5 100%);
+  border: 1px solid rgba(245, 197, 37, 0.52);
   box-shadow: 0 18px 34px rgba(74, 38, 121, 0.24);
-}
-.quick-pick-feature::after {
-  content: "✦   ✧   ✦";
-  position: absolute;
-  top: 14px;
-  right: 16px;
-  color: #ffd447;
-  font-size: 13px;
-  letter-spacing: 5px;
-  opacity: 0.9;
-}
-.quick-pick-dice {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 58px;
-  height: 58px;
-  border-radius: 18px;
-  color: #4d267d;
-  background: linear-gradient(145deg, #ffe37a, #ffc928);
-  box-shadow: 0 10px 20px rgba(38, 16, 68, 0.25), inset 0 1px 0 rgba(255,255,255,.7);
-  font-size: 36px;
-  line-height: 1;
-  transform: rotate(-7deg);
 }
 .quick-pick-kicker {
   display: inline-block;
   margin-bottom: 3px;
-  color: #ffe272;
-  font: 800 10px/1 var(--font-heading), sans-serif;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-.quick-pick-title {
-  font-family: var(--font-heading), sans-serif;
-  font-size: 24px;
-  font-weight: 900;
-  line-height: 1.05;
+  color: #fffaf0;
+  font: 900 32px/1.08 var(--font-heading), sans-serif;
+  letter-spacing: -0.02em;
 }
 .quick-pick-copy {
-  max-width: 270px;
-  margin-top: 6px;
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 12px;
+  max-width: 300px;
+  margin-top: 10px;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 13px;
+  line-height: 1.45;
 }
-.quick-pick-action {
+.quick-pick-buy {
+  position: relative;
+  z-index: 1;
   width: 100%;
-  padding: 12px 16px;
-  border-radius: 14px;
-  color: #4d267d;
-  background: linear-gradient(180deg, #ffe77d, #ffd447);
-  box-shadow: 0 8px 18px rgba(38, 16, 68, 0.24), inset 0 1px 0 rgba(255,255,255,.72);
+  padding: 14px 18px;
+  border-radius: 15px;
+  color: #432269;
+  background: linear-gradient(180deg, #fffdf7, #f5eddd);
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  box-shadow: 0 10px 20px rgba(32, 13, 56, 0.24), inset 0 1px 0 #fff;
   font-family: var(--font-heading), sans-serif;
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 900;
-  transition: transform 160ms ease, box-shadow 160ms ease;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
 }
-.quick-pick-action:hover { transform: translateY(-2px); box-shadow: 0 11px 22px rgba(38, 16, 68, 0.3); }
-.quick-pick-action:active { transform: translateY(0) scale(0.99); }
+.quick-pick-buy:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 13px 24px rgba(32, 13, 56, 0.3), inset 0 1px 0 #fff; }
+.quick-pick-buy:active:not(:disabled) { transform: translateY(0) scale(0.99); }
+.quick-pick-buy:disabled { cursor: not-allowed; opacity: 0.58; }
 
 .play-ticket-panel {
   position: relative;

@@ -648,10 +648,10 @@ export default function Home() {
 
   // ── Handlers ─────────────────────────────────────────────────────
 
-  const handleQuickPick = useCallback(() => {
+  const handleShuffleSelection = useCallback(() => {
     if (!drawingState) return;
     setSelection(generateQuickPick(drawingState.ballMax, drawingState.bonusballMax));
-    setMode("quick");
+    setMode("pick");
   }, [drawingState]);
 
   const toggleBall = useCallback(
@@ -1040,6 +1040,7 @@ export default function Home() {
     () => new Set(),
   );
   const [lastClaimedAmount, setLastClaimedAmount] = useState<bigint>(BigInt(0));
+  const [lastClaimedTickets, setLastClaimedTickets] = useState<ApiTicket[]>([]);
 
   // Map round id → its winning numbers, so a ticket can be checked against the
   // ACTUAL draw (matched_normals is only a count — it doesn't say which hit).
@@ -1115,6 +1116,7 @@ export default function Home() {
           return next;
         });
         setLastClaimedAmount(claimedAmount);
+        setLastClaimedTickets(tickets);
         setClaimPhase("success");
         // Refetch on-chain reads so balance updates immediately
         refetchUsdcBalance();
@@ -1137,11 +1139,21 @@ export default function Home() {
 
   const handleShareWinnings = useCallback(() => {
     if (lastClaimedAmount <= BigInt(0)) return;
+    const featuredTicket = lastClaimedTickets[0];
+    const params = new URLSearchParams({
+      amount: formatUSDC(lastClaimedAmount),
+      round: featuredTicket?.round_id ?? "",
+      normals: featuredTicket?.normals.join(",") ?? "",
+      bonus: featuredTicket ? String(featuredTicket.bonusball) : "",
+      bonusHit: featuredTicket?.bonusball_match ? "1" : "0",
+      tickets: String(lastClaimedTickets.length),
+    });
+    const cardUrl = `${APP_URL}/api/share/win-card?${params.toString()}`;
     composeCast({
       text: `I just won $${formatUSDC(lastClaimedAmount)} USDC on Farpot 🎉 Feeling lucky?`,
-      embeds: [APP_URL],
+      embeds: [cardUrl, APP_URL],
     });
-  }, [composeCast, lastClaimedAmount]);
+  }, [composeCast, lastClaimedAmount, lastClaimedTickets]);
 
   // ── Render: Loading ──────────────────────────────────────────────
 
@@ -1340,7 +1352,7 @@ export default function Home() {
                   : "text-mut hover:text-navy"
               }`}
             >
-              <span aria-hidden="true">✦</span> QUICK PICK
+              QUICK PICK
             </button>
           </div>
 
@@ -1406,13 +1418,20 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Reset selection */}
-              <button
-                onClick={() => setSelection({ normals: [], bonusball: 0 })}
-                className="text-xs text-mut hover:text-royal transition-colors"
-              >
-                Clear selection
-              </button>
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => setSelection({ normals: [], bonusball: 0 })}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 border border-slate-200 px-3 py-1.5 text-xs text-mut font-heading font-extrabold hover:bg-slate-200 hover:text-royal transition-colors"
+                >
+                  <span aria-hidden="true">×</span> Clear selection
+                </button>
+                <button
+                  onClick={handleShuffleSelection}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-royal/10 border border-royal/20 px-3 py-1.5 text-xs text-royal font-heading font-extrabold hover:bg-royal/20 transition-colors"
+                >
+                  <span aria-hidden="true">↻</span> Shuffle
+                </button>
+              </div>
             </div>
           )}
 
@@ -1420,47 +1439,48 @@ export default function Home() {
 
           {mode === "quick" && (
             <div className="quick-pick-feature">
-              <div className="quick-pick-dice" aria-hidden="true">⚄</div>
               <div className="relative z-10 text-center">
-                <span className="quick-pick-kicker">Feeling lucky?</span>
-                <h3 className="quick-pick-title">Lucky Quick Pick</h3>
+                <span className="quick-pick-kicker">Feeling lucky</span>
                 <p className="quick-pick-copy">
                   Let the lottery choose your numbers securely on-chain.
                 </p>
               </div>
-              <button
-                onClick={handleQuickPick}
-                className="quick-pick-action relative z-10"
-              >
-                <span aria-hidden="true">🎲</span> Shuffle my lucky numbers
-              </button>
+              {!isRecurring && buyPhase !== "success" && buyPhase !== "error" && (
+                <button
+                  onClick={handleBuy}
+                  disabled={!canBuy}
+                  className={`quick-pick-buy ${
+                    buyPhase === "approving" || buyPhase === "buying" ? "animate-pulse" : ""
+                  }`}
+                >
+                  {buyPhase === "approving"
+                    ? "Approving USDC…"
+                    : buyPhase === "buying"
+                    ? "Purchasing…"
+                    : !isSalesOpen
+                    ? "Sales Closed"
+                    : allowance === undefined
+                    ? "Checking approval…"
+                    : usdcBalance !== undefined && usdcBalance < totalCost
+                    ? "Insufficient Balance"
+                    : giftState.address
+                    ? `Quick Pick for @${giftState.username || "friend"}`
+                    : "Quick Pick"}
+                </button>
+              )}
             </div>
           )}
 
           {/* ── Brief item 8a: skeuomorphic ticket card ──────────── */}
-          {/* Shows selected/quick-pick numbers + countdown; cream with notched edges */}
+          {/* Shared selected/quick-pick number ticket */}
           {(mode === "pick" && selection.normals.length > 0) || (mode === "quick") ? (
-            <div
-              className="relative rounded-xl px-4 py-3 text-navy-deep"
-              style={{
-                background: "linear-gradient(180deg, #fdfaf2, #f1e9d8)",
-                boxShadow: "0 10px 22px -12px rgba(0,0,0,.6)",
-              }}
-            >
+            <div className="number-ticket-preview relative rounded-xl px-4 py-5">
               {/* Notched edges via pseudo-elements */}
               <span className="absolute -left-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#f7f5ef" }} />
               <span className="absolute -right-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#f7f5ef" }} />
 
-              {/* Header row */}
-              <div className="flex justify-between items-center text-[9px] uppercase tracking-widest font-heading font-extrabold mb-2">
-                <span className="text-royal/80">{mode === "pick" ? "Your pick" : "Quick pick"}</span>
-                <span className="rounded-full px-2 py-0.5 text-white font-mono tabular-nums" style={{ background: "#855dcd" }}>
-                  ⏱ {countdown}
-                </span>
-              </div>
-
               {/* Balls row */}
-              <div className="flex gap-1.5 items-center">
+              <div className="flex gap-1.5 items-center justify-center flex-wrap">
                 {mode === "pick" && selection.normals.length > 0 ? (
                   <>
                     {selection.normals.map((n) => (
@@ -1468,7 +1488,7 @@ export default function Home() {
                         {String(n).padStart(2, "0")}
                       </span>
                     ))}
-                    <span className="text-royal/60 text-xs mx-0.5">+</span>
+                    <span className="text-white/60 text-xs mx-0.5">+</span>
                     <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold">
                       {selection.bonusball > 0 ? String(selection.bonusball).padStart(2, "0") : "--"}
                     </span>
@@ -1481,7 +1501,7 @@ export default function Home() {
                         {String(n).padStart(2, "0")}
                       </span>
                     ))}
-                    <span className="text-royal/60 text-xs mx-0.5">+</span>
+                    <span className="text-white/60 text-xs mx-0.5">+</span>
                     <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold animate-[numberReveal_0.4s_ease-out_both]" style={{ animationDelay: "500ms" }}>
                       {String(resolvedQuickPick.bonusball).padStart(2, "0")}
                     </span>
@@ -1494,7 +1514,7 @@ export default function Home() {
                         {String(n).padStart(2, "0")}
                       </span>
                     ))}
-                    <span className="text-royal/60 text-xs mx-0.5">+</span>
+                    <span className="text-white/60 text-xs mx-0.5">+</span>
                     <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold tabular-nums">
                       {String(shuffleDisplay.bonusball).padStart(2, "0")}
                     </span>
@@ -1502,7 +1522,7 @@ export default function Home() {
                 ) : mode === "quick" && quickPickPending ? (
                   /* Quick-pick bought but numbers not confirmed from the API yet —
                      never show a stale ticket as yours; point the user at Results. */
-                  <span className="text-royal/70 text-[11px] font-heading font-semibold">
+                  <span className="text-white/80 text-[11px] font-heading font-semibold">
                     Numbers assigned — see Results below ↓
                   </span>
                 ) : (
@@ -1513,7 +1533,7 @@ export default function Home() {
                         --
                       </span>
                     ))}
-                    <span className="text-royal/60 text-xs mx-0.5">+</span>
+                    <span className="text-white/60 text-xs mx-0.5">+</span>
                     <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-empty">--</span>
                   </>
                 )}
@@ -1783,7 +1803,7 @@ export default function Home() {
                   : `Start ${subDuration}-Day Auto-Buy · $${formatUSDC(subTotalCost)}`}
               </button>
             )
-          ) : (
+          ) : mode === "pick" ? (
             <button
               onClick={handleBuy}
               disabled={!canBuy}
@@ -1805,9 +1825,9 @@ export default function Home() {
                 ? "Insufficient Balance"
                 : giftState.address
                 ? `Gift ${quantity} Ticket${quantity > 1 ? "s" : ""} to @${giftState.username || "friend"}`
-                : `Buy ${quantity} Ticket${quantity > 1 ? "s" : ""}`}
+              : `Buy ${quantity} Ticket${quantity > 1 ? "s" : ""}`}
             </button>
-          )}
+          ) : null}
 
 
           </div>
