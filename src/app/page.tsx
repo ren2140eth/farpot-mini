@@ -239,33 +239,23 @@ interface SearchUserResult {
   verified_address: `0x${string}` | null;
 }
 
-// ── Brand mark: the gold jackpot star-ball ───────────────────────────
+// ── Brand mark: flat lottery star in the clean play-slip system ─────
 function StarBall({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">
-      <defs>
-        <radialGradient id="sbGold" cx="36%" cy="30%" r="78%">
-          <stop offset="0%" stopColor="#FFF7D6" />
-          <stop offset="32%" stopColor="#FFD971" />
-          <stop offset="66%" stopColor="#F2A93B" />
-          <stop offset="100%" stopColor="#A9660A" />
-        </radialGradient>
-      </defs>
-      <circle cx="50" cy="50" r="46" fill="url(#sbGold)" stroke="#7A4A06" strokeWidth="2.5" />
-      <ellipse cx="38" cy="34" rx="15" ry="10" fill="#fff" opacity="0.5" />
-      <path d="M50,24 57.6,43 78,44.5 62.5,57.5 67.5,77 50,66 32.5,77 37.5,57.5 22,44.5 42.4,43Z" fill="#fff" opacity="0.9" />
+      <path d="M50,5 60.6,35.4 92.8,36.1 67.2,55.6 76.5,86.5 50,68 23.5,86.5 32.8,55.6 7.2,36.1 39.4,35.4Z" fill="#F5C525" />
     </svg>
   );
 }
 
-// ── MEGA ⭐ POT lockup ────────────────────────────────────────────────
+// ── FAR ★ POT lockup ────────────────────────────────────────────────
 function Logo({ scale = 1 }: { scale?: number }) {
   const fs = 32 * scale;
   return (
-    <div className="flex items-center justify-center gap-1.5">
+    <div className="lottery-logo inline-flex items-center justify-center gap-1.5 px-4 py-1">
       <span className="display white-text" style={{ fontSize: fs }}>FAR</span>
-      <StarBall size={fs * 1.05} />
-      <span className="display gold-text" style={{ fontSize: fs }}>POT</span>
+      <StarBall size={fs * 0.72} />
+      <span className="display text-royal" style={{ fontSize: fs }}>POT</span>
     </div>
   );
 }
@@ -274,8 +264,8 @@ function Logo({ scale = 1 }: { scale?: number }) {
 // Brief item 4b: green badge dot on Results when claimable winnings exist
 function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey; onTabChange: (tab: TabKey) => void; hasClaimable?: boolean }) {
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      <nav className="flex items-center gap-1 px-3 py-2 rounded-full bg-navy-deep/95 backdrop-blur-md border border-white/10 shadow-lg shadow-black/40">
+    <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-50" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+      <nav className="flex items-center gap-1 px-3 py-2 rounded-full bg-white/95 backdrop-blur-md border border-slate-200 shadow-lg shadow-slate-300/40">
         {[
           {
             key: 'play' as TabKey,
@@ -319,8 +309,8 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
             onClick={() => onTabChange(key)}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-full transition-colors relative ${
               activeTab === key
-                ? 'bg-white/10 text-gold'
-                : 'text-mut/60 hover:text-mut hover:bg-white/5'
+                ? 'bg-royal/10 text-royal'
+                : 'text-mut/70 hover:text-navy hover:bg-slate-100'
             }`}
           >
             <span>{icon}</span>
@@ -1139,13 +1129,13 @@ export default function Home() {
   // ── Render: Main UI (brief item 2: no early-return wall) ──────────
 
   return (
-    <div className="flex flex-col flex-1 max-w-lg mx-auto w-full px-4 py-6 gap-6 pb-28">
+    <div className="app-shell flex flex-col flex-1 max-w-lg mx-auto w-full px-4 py-5 gap-5 pb-28">
       <Suspense fallback={null}>
         <TabReader onTab={setActiveTab} />
         <GiftReader onGift={setGiftState} />
       </Suspense>
       {/* Header */}
-      <div className="text-center">
+      <div className="text-center py-2">
         <Logo scale={1.1} />
       </div>
 
@@ -1166,19 +1156,13 @@ export default function Home() {
             </button>
           )}
 
-          {/* Jackpot info card — reskinned to Farcaster purple */}
-          <div
-            className="rounded-2xl border border-gold/25 p-6 space-y-4"
-            style={{
-              background:
-                "radial-gradient(420px 200px at 50% 0%, rgba(133,93,205,.35), transparent 70%), linear-gradient(180deg, #2c1e3e, #241833)",
-            }}
-          >
+          {/* Jackpot info card — clean flagship surface with lottery accents */}
+          <div className="jackpot-card rounded-3xl p-6 space-y-5">
             <div className="text-center">
-              <p className="text-gold-light text-xs font-heading font-bold uppercase tracking-[0.22em]">
-                Current jackpot
+              <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
+                Today&apos;s jackpot
               </p>
-              <p className="display gold-text pulse-gold text-5xl mt-2">
+              <p className="display gold-text pulse-gold text-6xl mt-2 tabular-nums">
                 {headlineJackpotUsd != null
                   ? `$${headlineJackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
                   : "…"}
@@ -1187,7 +1171,7 @@ export default function Home() {
             <div className="grid grid-cols-3 gap-4 text-center">
               <div>
                 <p className="text-mut text-[10px] uppercase tracking-wider">Draws In</p>
-                <p className="text-gold font-heading font-extrabold text-lg">{countdown}</p>
+                <p className="text-royal font-heading font-extrabold text-lg">{countdown}</p>
               </div>
               <div>
                 <p className="text-mut text-[10px] uppercase tracking-wider">Ticket</p>
@@ -1305,13 +1289,13 @@ export default function Home() {
           )}
 
           {/* ── Pick / Quick mode toggle (always shown; carries into recurring) ── */}
-          <div className="flex gap-2 p-1 rounded-xl bg-black/30">
+          <div className="segmented-control flex gap-1 p-1 rounded-xl">
             <button
               onClick={() => switchMode("pick")}
               className={`flex-1 py-2.5 rounded-lg text-sm font-heading font-extrabold tracking-wide transition-colors ${
                 mode === "pick"
-                  ? "bg-gradient-to-b from-gold-light to-gold-deep text-navy-deep"
-                  : "text-mut hover:text-white"
+                  ? "segmented-active"
+                  : "text-mut hover:text-navy"
               }`}
             >
               PICK NUMBERS
@@ -1320,8 +1304,8 @@ export default function Home() {
               onClick={() => switchMode("quick")}
               className={`flex-1 py-2.5 rounded-lg text-sm font-heading font-extrabold tracking-wide transition-colors ${
                 mode === "quick"
-                  ? "bg-gradient-to-b from-gold-light to-gold-deep text-navy-deep"
-                  : "text-mut hover:text-white"
+                  ? "segmented-active"
+                  : "text-mut hover:text-navy"
               }`}
             >
               QUICK PICK
@@ -1393,7 +1377,7 @@ export default function Home() {
               {/* Reset selection */}
               <button
                 onClick={() => setSelection({ normals: [], bonusball: 0 })}
-                className="text-xs text-mut hover:text-white transition-colors"
+                className="text-xs text-mut hover:text-royal transition-colors"
               >
                 Clear selection
               </button>
@@ -1406,7 +1390,7 @@ export default function Home() {
             <div className="space-y-3">
               <button
                 onClick={handleQuickPick}
-                className="w-full py-3 rounded-xl bg-black/30 hover:bg-black/40 text-white font-heading font-bold transition-colors flex items-center justify-center gap-2"
+                className="soft-panel w-full py-3 rounded-xl hover:border-royal/40 text-navy font-heading font-bold transition-colors flex items-center justify-center gap-2"
               >
                 🎲 Quick Pick
               </button>
@@ -1427,13 +1411,13 @@ export default function Home() {
               }}
             >
               {/* Notched edges via pseudo-elements */}
-              <span className="absolute -left-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#17101f" }} />
-              <span className="absolute -right-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#17101f" }} />
+              <span className="absolute -left-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#f7f5ef" }} />
+              <span className="absolute -right-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#f7f5ef" }} />
 
               {/* Header row */}
               <div className="flex justify-between items-center text-[9px] uppercase tracking-widest font-heading font-extrabold mb-2">
                 <span className="text-royal/80">{mode === "pick" ? "Your pick" : "Quick pick"}</span>
-                <span className="rounded-full px-2 py-0.5 text-gold font-mono tabular-nums" style={{ background: "#241a30" }}>
+                <span className="rounded-full px-2 py-0.5 text-white font-mono tabular-nums" style={{ background: "#855dcd" }}>
                   ⏱ {countdown}
                 </span>
               </div>
@@ -1576,11 +1560,11 @@ export default function Home() {
           </div>
 
           {/* ── Summary card + Repeat-daily switch (brief items 1, 3) ─ */}
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4 space-y-3">
+          <div className="soft-panel rounded-xl p-4 space-y-3">
             {/* Repeat-daily switch row — disabled when a sub is active or in gift mode */}
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-sm text-white font-heading font-bold flex items-center gap-1.5">
+                <p className="text-sm text-navy font-heading font-bold flex items-center gap-1.5">
                   <span>🔁</span> Repeat daily
                 </p>
                 {(subInfo?.isActive || giftState.address) && (
@@ -1598,7 +1582,7 @@ export default function Home() {
                 disabled={!!subInfo?.isActive || !!giftState.address}
                 onClick={() => setRepeatDaily(!isRecurring)}
                 className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
-                  isRecurring ? "bg-gold-deep" : "bg-white/15"
+                  isRecurring ? "bg-royal" : "bg-slate-300"
                 }`}
               >
                 <span
@@ -1641,13 +1625,13 @@ export default function Home() {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-mut">Total ({subDuration} days)</span>
-                    <span className="text-white font-heading font-bold">${formatUSDC(subTotalCost)} USDC</span>
+                    <span className="text-navy font-heading font-bold">${formatUSDC(subTotalCost)} USDC</span>
                   </div>
                 </>
               ) : (
                 <div className="flex justify-between text-mut">
                   <span>Total cost</span>
-                  <span className="text-white font-heading font-bold">${formatUSDC(totalCost)} USDC</span>
+                  <span className="text-navy font-heading font-bold">${formatUSDC(totalCost)} USDC</span>
                 </div>
               )}
               {usdcBalance !== undefined && (

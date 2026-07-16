@@ -32,15 +32,15 @@ export async function generateMetadata(): Promise<Metadata> {
 
   const embed = {
     version,
-    imageUrl: `${rootUrl}/hero-v4.png`,
+    imageUrl: `${rootUrl}/hero-v7.png`,
     button: {
       title: `Launch ${name}`,
       action: {
         type: "launch_miniapp",
         name,
         url: homeUrl,
-        splashImageUrl: `${rootUrl}/splash-v2.png`,
-        splashBackgroundColor: "#0d0916",
+        splashImageUrl: `${rootUrl}/splash-v5.png`,
+        splashBackgroundColor: "#faf8f2",
       },
     },
   };
@@ -51,7 +51,7 @@ export async function generateMetadata(): Promise<Metadata> {
     openGraph: {
       title: `${name} — powered by Megapot`,
       description: `Gift and buy $1 lottery tickets on Base. Daily drawings, real prizes.`,
-      images: [`${rootUrl}/hero-v4.png`],
+      images: [`${rootUrl}/hero-v7.png`],
     },
     other: {
       "fc:miniapp": JSON.stringify(embed),

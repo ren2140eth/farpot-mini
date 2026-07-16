@@ -1,18 +1,19 @@
 @import "tailwindcss";
 
-/* ── Farpot brand palette (Farcaster-purple, direction B) ─────────── */
+/* ── Farpot brand palette: clean lottery slip + Farcaster purple ─── */
 @theme {
-  --color-navy: #17101f;
-  --color-navy-deep: #1e1429;
-  --color-navy-card: #241833;
-  --color-gold: #ffce2e;
-  --color-gold-deep: #f5a623;
-  --color-gold-light: #ffe9a8;
+  --color-navy: #34204f;
+  --color-navy-deep: #f7f5ef;
+  --color-navy-card: #ffffff;
+  --color-gold: #f5c525;
+  --color-gold-deep: #dba914;
+  --color-gold-light: #fff2a8;
   --color-royal: #855dcd;
-  --color-win: #e5383b;
-  --color-cream: #f4eefb;
-  --color-mut: #a895c4;
-  --color-wins-green: #34d399;
+  --color-win: #d9424e;
+  --color-cream: #34204f;
+  --color-mut: #756782;
+  --color-coral: #f06a4f;
+  --color-wins-green: #16875f;
 
   --font-display: var(--font-anton);
   --font-heading: var(--font-archivo);
@@ -29,58 +30,63 @@
 
 body {
   background:
-    radial-gradient(1100px 600px at 50% -8%, rgba(133, 93, 205, 0.38) 0%, transparent 58%),
-    linear-gradient(180deg, var(--color-navy-deep), #0d0916 80%);
+    radial-gradient(circle at 8% 9%, rgba(240, 106, 79, 0.16) 0 5px, transparent 6px),
+    radial-gradient(circle at 92% 17%, rgba(245, 197, 37, 0.2) 0 7px, transparent 8px),
+    radial-gradient(900px 430px at 50% -12%, rgba(133, 93, 205, 0.16), transparent 62%),
+    linear-gradient(180deg, #fffdf8 0%, #f7f5ef 68%, #f2f0ea 100%);
   color: var(--color-cream);
   font-family: var(--font-inter), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Display type: bold lottery italic ────────────────────────────── */
+/* ── Display type: bold, official lottery typography ─────────────── */
 .display {
   font-family: var(--font-anton), sans-serif;
   font-weight: 400;
   letter-spacing: 0.5px;
-  transform: skewX(-7deg);
+  transform: none;
   display: inline-block;
 }
 .gold-text {
-  background: linear-gradient(180deg, #fff0b8 0%, #ffd56b 46%, #f3b43c 56%, #c5840e 100%);
+  background: linear-gradient(180deg, #513269 0%, #34204f 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  -webkit-text-stroke: 1.2px rgba(6, 16, 43, 0.5);
-  filter: drop-shadow(0 2px 0 rgba(6, 16, 43, 0.4)) drop-shadow(0 0 16px rgba(255, 206, 46, 0.3));
+  -webkit-text-stroke: 0;
+  filter: none;
 }
 .white-text {
-  color: #fff;
-  -webkit-text-stroke: 1.2px rgba(23, 16, 31, 0.55);
-  filter: drop-shadow(0 2px 0 rgba(23, 16, 31, 0.45));
+  color: #f06a4f;
+  -webkit-text-stroke: 0;
+  filter: none;
 }
 
 /* ── Lottery balls ────────────────────────────────────────────────── */
 .brand-ball {
-  position: relative;
-  background: radial-gradient(circle at 36% 30%, #fff, #e9e2f5 55%, #c9bce4);
-  color: var(--color-navy-deep);
-  box-shadow: inset 0 -5px 10px rgba(96, 70, 150, 0.35), 0 6px 12px -5px rgba(0, 0, 0, 0.55);
+  background: #fff;
+  color: #34204f;
+  border: 1.5px solid #855dcd;
+  box-shadow: 0 4px 12px rgba(82, 48, 112, 0.1);
 }
 .brand-ball-gold {
-  background: radial-gradient(circle at 36% 30%, #fff3c4, var(--color-gold) 55%, var(--color-gold-deep));
-  color: var(--color-navy-deep);
+  background: #f5c525;
+  color: #34204f;
+  border: 1.5px solid #dba914;
+  box-shadow: 0 4px 12px rgba(219, 169, 20, 0.18);
 }
 .brand-ball-empty {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--color-mut);
+  background: #f7f8fb;
+  color: #66708a;
+  border: 1px solid #dfe3ec;
 }
 
-/* ── Gold buy button with shine sweep ─────────────────────────────── */
+/* ── Farcaster-purple primary action ──────────────────────────────── */
 .btn-gold {
   position: relative;
   overflow: hidden;
-  color: #1a1206;
-  background: linear-gradient(180deg, #ffe9a8, #ffce2e 45%, #f5a623);
-  box-shadow: 0 10px 22px -8px rgba(255, 206, 46, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  color: #fff;
+  background: linear-gradient(135deg, #9b78e0 0%, #855dcd 55%, #7045bc 100%);
+  box-shadow: 0 12px 24px -12px rgba(112, 69, 188, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 .btn-gold::before {
   content: "";
@@ -89,7 +95,7 @@ body {
   left: -120%;
   width: 55%;
   height: 100%;
-  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.7), transparent);
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.42), transparent);
   transform: skewX(-20deg);
   animation: sweep 3.4s ease-in-out infinite;
 }
@@ -99,12 +105,65 @@ body {
 }
 
 .pulse-gold {
-  animation: pulse-gold 2.6s ease-in-out infinite;
+  animation: pulse-gold 3.2s ease-in-out infinite;
 }
 @keyframes pulse-gold {
-  0%, 100% { filter: drop-shadow(0 2px 0 rgba(6, 16, 43, 0.4)) drop-shadow(0 0 0 rgba(255, 206, 46, 0)); }
-  50% { filter: drop-shadow(0 2px 0 rgba(6, 16, 43, 0.4)) drop-shadow(0 0 22px rgba(255, 206, 46, 0.55)); }
+  0%, 100% { filter: none; }
+  50% { filter: drop-shadow(0 8px 18px rgba(133, 93, 205, 0.16)); }
 }
+
+.app-shell { min-height: 100%; }
+
+.surface-card {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #e1e4ec;
+  box-shadow: 0 12px 32px rgba(19, 36, 90, 0.07);
+}
+
+.lottery-logo { position: relative; isolation: isolate; }
+.lottery-logo::before,
+.lottery-logo::after {
+  content: "";
+  position: absolute;
+  left: 34%;
+  right: 24%;
+  height: 20px;
+  border-radius: 50%;
+  z-index: -1;
+}
+.lottery-logo::before { top: -5px; border-top: 2px solid #f06a4f; transform: rotate(-4deg); }
+.lottery-logo::after { bottom: -6px; border-bottom: 2px solid #855dcd; transform: rotate(5deg); }
+
+.jackpot-card {
+  background:
+    radial-gradient(circle at 88% 18%, rgba(245,197,37,.35) 0 5px, transparent 6px),
+    radial-gradient(circle at 11% 78%, rgba(240,106,79,.2) 0 7px, transparent 8px),
+    linear-gradient(128deg, transparent 0 72%, rgba(240,106,79,.05) 72% 75%, transparent 75%),
+    radial-gradient(ellipse at 50% 10%, rgba(133,93,205,.12), transparent 58%),
+    #fff;
+  border: 1px solid #dfe3ec;
+  box-shadow: 0 16px 38px rgba(19, 36, 90, 0.08);
+}
+
+.segmented-control { background: #eef1f7; border: 1px solid #dfe3ec; }
+.segmented-active { background: linear-gradient(135deg, #9b78e0, #855dcd); color: #fff; box-shadow: 0 5px 12px rgba(133,93,205,.2); }
+.soft-panel { background: #fff; border: 1px solid #e1e4ec; box-shadow: 0 8px 24px rgba(19,36,90,.05); }
+
+/* Compatibility bridge for the existing component's dark-theme utilities.
+   Keeping this scoped lets us reskin without touching transaction logic. */
+.app-shell .text-white { color: #34204f; }
+.app-shell [class~="bg-black/20"],
+.app-shell [class~="bg-black/30"] { background-color: rgba(255, 255, 255, 0.9); }
+.app-shell [class~="bg-white/5"] { background-color: #f4f5f8; }
+.app-shell [class~="bg-white/10"] { background-color: #eef1f7; }
+.app-shell [class~="border-white/5"],
+.app-shell [class~="border-white/7"],
+.app-shell [class~="border-white/10"] { border-color: #e1e4ec; }
+.app-shell [class~="hover:bg-white/10"]:hover,
+.app-shell [class~="hover:bg-white/20"]:hover { background-color: #e8eaf1; }
+.app-shell [class~="hover:text-white"]:hover { color: #855dcd; }
+.app-shell .btn-gold,
+.app-shell .bg-royal { color: #fff; }
 
 /* ── Number reveal animation (quick-pick post-purchase) ───────────── */
 @keyframes numberReveal {
