@@ -1129,7 +1129,7 @@ export default function Home() {
   // ── Render: Main UI (brief item 2: no early-return wall) ──────────
 
   return (
-    <div className="app-shell flex flex-col flex-1 max-w-lg mx-auto w-full px-4 py-5 gap-5 pb-28">
+    <div className="app-shell flex flex-col flex-1 max-w-lg mx-auto w-full px-4 py-5 gap-4 pb-28">
       <Suspense fallback={null}>
         <TabReader onTab={setActiveTab} />
         <GiftReader onGift={setGiftState} />
@@ -1194,7 +1194,7 @@ export default function Home() {
 
           {/* Brief item 3a: ticket-count pill ticker from most recent settled round */}
           {recentRounds.length > 0 && (
-            <div className="flex justify-center">
+            <div className="hidden">
               <span className="inline-flex items-center gap-2 text-xs font-semibold text-mut bg-royal/20 border border-royal/40 rounded-full px-3 py-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-wins-green" />
                 <span className="text-cream font-bold">{recentRounds[0].ticket_count.toLocaleString()} tickets</span> in last draw
@@ -1204,7 +1204,7 @@ export default function Home() {
 
           {/* Brief item 3b: 3-card recent wins strip with verify links */}
           {recentRounds.filter((r) => r.winners_count > 0).length >= 1 && (
-            <div className="flex gap-2">
+            <div className="hidden">
               {recentRounds
                 .filter((r) => r.winners_count > 0 && r.top_prize_amount != null)
                 .slice(0, 3)
@@ -1227,7 +1227,7 @@ export default function Home() {
           )}
 
           {/* Brief item 3c: fairness line */}
-          <p className="text-center text-xs text-mut">
+          <p className="hidden">
             Every draw is provably fair —{" "}
             <a
               href={`https://basescan.org/address/${JACKPOT_ADDRESS}`}
@@ -1776,6 +1776,24 @@ export default function Home() {
           )}
 
 
+          </div>
+
+          <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-2 text-center text-[11px] text-mut">
+            {recentRounds.length > 0 && (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                {recentRounds[0].ticket_count.toLocaleString()} tickets last draw
+              </span>
+            )}
+            <span aria-hidden="true">·</span>
+            <a
+              href={`https://basescan.org/address/${JACKPOT_ADDRESS}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-royal underline underline-offset-2"
+            >
+              Provably fair on BaseScan ↗
+            </a>
           </div>
           </>)}
 

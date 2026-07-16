@@ -151,14 +151,33 @@ body {
 
 .play-ticket-panel {
   position: relative;
-  padding: 22px 18px;
+  padding: 24px 18px 20px;
   border-radius: 28px;
   background:
     radial-gradient(circle at 94% 5%, rgba(245,197,37,.3) 0 4px, transparent 5px),
     linear-gradient(155deg, rgba(133,93,205,.045), transparent 36%),
     #fff;
-  border: 1px solid #dedbe5;
-  box-shadow: 0 18px 42px rgba(52,32,79,.08);
+  border: 1px solid #d9d2e2;
+  border-top: 4px solid #f06a4f;
+  box-shadow: 0 20px 46px rgba(52,32,79,.11);
+}
+
+.play-ticket-panel::before,
+.play-ticket-panel::after {
+  content: "";
+  position: absolute;
+  top: 48%;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #f7f5ef;
+}
+.play-ticket-panel::before { left: -10px; }
+.play-ticket-panel::after { right: -10px; }
+
+.play-ticket-panel .segmented-control {
+  padding: 5px;
+  border-radius: 16px;
 }
 
 /* Compatibility bridge for the existing component's dark-theme utilities.
