@@ -49,6 +49,16 @@ type BuyPhase = "idle" | "approving" | "buying" | "success" | "error";
 type TabKey = "play" | "gift" | "results";
 type QtyPreset = "1" | "5" | "10" | "custom";
 
+function ConfettiBurst() {
+  return (
+    <div className="confetti-burst" aria-hidden="true">
+      {Array.from({ length: 28 }, (_, index) => (
+        <span key={index} className="confetti-piece" />
+      ))}
+    </div>
+  );
+}
+
 // ── Subscription types ───────────────────────────────────────────────
 
 type SubPhase = "idle" | "approving" | "subscribing" | "success" | "error" | "cancelling";
@@ -1026,6 +1036,10 @@ export default function Home() {
   const [claimPhase, setClaimPhase] = useState<ClaimPhase>("idle");
   const [claimError, setClaimError] = useState("");
   const [claimingIds, setClaimingIds] = useState<string[]>([]); // API ids in flight
+  const [optimisticallyClaimedIds, setOptimisticallyClaimedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [lastClaimedAmount, setLastClaimedAmount] = useState<bigint>(BigInt(0));
 
   // Map round id → its winning numbers, so a ticket can be checked against the
   // ACTUAL draw (matched_normals is only a count — it doesn't say which hit).
@@ -1044,10 +1058,11 @@ export default function Home() {
       userTickets.filter(
         (t) =>
           !t.claimed &&
+          !optimisticallyClaimedIds.has(t.id) &&
           t.winnings_amount != null &&
           Number(t.winnings_amount.amount) > 0,
       ),
-    [userTickets],
+    [userTickets, optimisticallyClaimedIds],
   );
 
   const totalClaimable = useMemo(
@@ -1077,6 +1092,10 @@ export default function Home() {
   const handleClaim = useCallback(
     async (tickets: ApiTicket[]) => {
       if (!address || tickets.length === 0) return;
+      const claimedAmount = tickets.reduce(
+        (sum, ticket) => sum + BigInt(ticket.winnings_amount?.amount ?? "0"),
+        BigInt(0),
+      );
       setClaimError("");
       setClaimingIds(tickets.map((t) => t.id));
       setClaimPhase("claiming");
@@ -1090,6 +1109,12 @@ export default function Home() {
         });
         const receipt = await waitForTransactionReceipt(config, { hash });
         if (receipt.status === "reverted") throw new Error("Claim reverted");
+        setOptimisticallyClaimedIds((current) => {
+          const next = new Set(current);
+          tickets.forEach((ticket) => next.add(ticket.id));
+          return next;
+        });
+        setLastClaimedAmount(claimedAmount);
         setClaimPhase("success");
         // Refetch on-chain reads so balance updates immediately
         refetchUsdcBalance();
@@ -1109,6 +1134,14 @@ export default function Home() {
     },
     [address, config],
   );
+
+  const handleShareWinnings = useCallback(() => {
+    if (lastClaimedAmount <= BigInt(0)) return;
+    composeCast({
+      text: `I just won $${formatUSDC(lastClaimedAmount)} USDC on Farpot 🎉 Feeling lucky?`,
+      embeds: [APP_URL],
+    });
+  }, [composeCast, lastClaimedAmount]);
 
   // ── Render: Loading ──────────────────────────────────────────────
 
@@ -1301,13 +1334,13 @@ export default function Home() {
             </button>
             <button
               onClick={() => switchMode("quick")}
-              className={`flex-1 py-2.5 rounded-lg text-sm font-heading font-extrabold tracking-wide transition-colors ${
+              className={`quick-pick-tab flex-1 py-2.5 rounded-lg text-sm font-heading font-extrabold tracking-wide transition-all ${
                 mode === "quick"
-                  ? "segmented-active"
+                  ? "quick-pick-tab-active"
                   : "text-mut hover:text-navy"
               }`}
             >
-              QUICK PICK
+              <span aria-hidden="true">✦</span> QUICK PICK
             </button>
           </div>
 
@@ -1386,16 +1419,21 @@ export default function Home() {
           {/* ── Quick pick mode ──────────────────────────────────── */}
 
           {mode === "quick" && (
-            <div className="space-y-3">
+            <div className="quick-pick-feature">
+              <div className="quick-pick-dice" aria-hidden="true">⚄</div>
+              <div className="relative z-10 text-center">
+                <span className="quick-pick-kicker">Feeling lucky?</span>
+                <h3 className="quick-pick-title">Lucky Quick Pick</h3>
+                <p className="quick-pick-copy">
+                  Let the lottery choose your numbers securely on-chain.
+                </p>
+              </div>
               <button
                 onClick={handleQuickPick}
-                className="soft-panel w-full py-3 rounded-xl hover:border-royal/40 text-navy font-heading font-bold transition-colors flex items-center justify-center gap-2"
+                className="quick-pick-action relative z-10"
               >
-                🎲 Quick Pick
+                <span aria-hidden="true">🎲</span> Shuffle my lucky numbers
               </button>
-              <p className="text-mut text-xs text-center italic">
-                Numbers are assigned randomly on-chain by Megapot.
-              </p>
             </div>
           )}
 
@@ -1659,7 +1697,8 @@ export default function Home() {
               </button>
             </div>
           ) : buyPhase === "success" ? (
-            <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-center space-y-3">
+            <div className="relative rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-center space-y-3 overflow-visible">
+              <ConfettiBurst />
               <p className="text-emerald-400 font-medium">🎉 Tickets purchased!</p>
               <button
                 onClick={handleShare}
@@ -2082,6 +2121,30 @@ export default function Home() {
           <div>
             <h2 className="text-lg font-semibold text-white mb-3">Your Tickets</h2>
 
+            {claimPhase === "success" && (
+              <div className="claim-success-card relative mb-3 overflow-visible rounded-xl p-4 text-center space-y-3">
+                <ConfettiBurst />
+                <p className="text-emerald-700 font-heading font-extrabold">
+                  🎉 ${formatUSDC(lastClaimedAmount)} USDC claimed!
+                </p>
+                <p className="text-xs text-mut">Your winnings were sent to your wallet.</p>
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={handleShareWinnings}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-royal text-white text-sm font-heading font-bold"
+                  >
+                    Share your win
+                  </button>
+                  <button
+                    onClick={() => setClaimPhase("idle")}
+                    className="text-xs text-mut hover:text-royal"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Claim-all banner — appears when there are unclaimed winnings */}
             {claimableWins.length > 0 && (
               <div className="mb-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 space-y-3">
@@ -2105,11 +2168,6 @@ export default function Home() {
                 </div>
                 {claimPhase === "error" && (
                   <p className="text-xs text-win">{claimError}</p>
-                )}
-                {claimPhase === "success" && (
-                  <p className="text-xs text-emerald-400">
-                    ✓ Claimed — USDC sent to your wallet.
-                  </p>
                 )}
               </div>
             )}
@@ -2143,6 +2201,7 @@ export default function Home() {
                   const won =
                     ticket.winnings_amount != null &&
                     Number(ticket.winnings_amount.amount) > 0;
+                  const isClaimed = ticket.claimed || optimisticallyClaimedIds.has(ticket.id);
                   const isMatch = (n: number) =>
                     winning ? winning.normals.includes(n) : false;
                   const bonusHit =
@@ -2165,7 +2224,7 @@ export default function Home() {
                         {won && (
                           <span className="text-xs font-medium text-emerald-400 flex items-center gap-2">
                             Won ${formatApiAmount(ticket.winnings_amount)} USDC
-                            {ticket.claimed ? (
+                            {isClaimed ? (
                               <span className="text-mut">✓ claimed</span>
                             ) : (
                               <button
