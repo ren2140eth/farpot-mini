@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import Image from "next/image";
 import { useAccount, useConfig, useReadContract } from "wagmi";
 import { estimateGas, writeContract, waitForTransactionReceipt } from "wagmi/actions";
 import { stringToHex, formatUnits, encodeFunctionData } from "viem";
@@ -239,24 +240,18 @@ interface SearchUserResult {
   verified_address: `0x${string}` | null;
 }
 
-// ── Brand mark: flat lottery star in the clean play-slip system ─────
-function StarBall({ size = 28 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">
-      <path d="M50,5 60.6,35.4 92.8,36.1 67.2,55.6 76.5,86.5 50,68 23.5,86.5 32.8,55.6 7.2,36.1 39.4,35.4Z" fill="#F5C525" />
-    </svg>
-  );
-}
-
-// ── FAR ★ POT lockup ────────────────────────────────────────────────
+// ── Shared FAR ★ POT lockup from the approved brand mockup ─────────
 function Logo({ scale = 1 }: { scale?: number }) {
-  const fs = 32 * scale;
   return (
-    <div className="lottery-logo inline-flex items-center justify-center gap-1.5 px-4 py-1">
-      <span className="display white-text" style={{ fontSize: fs }}>FAR</span>
-      <StarBall size={fs * 0.72} />
-      <span className="display text-royal" style={{ fontSize: fs }}>POT</span>
-    </div>
+    <Image
+      src="/wordmark-v1.png"
+      alt="Farpot"
+      width={942}
+      height={252}
+      priority
+      className="mx-auto h-auto"
+      style={{ width: `${210 * scale}px` }}
+    />
   );
 }
 

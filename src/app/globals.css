@@ -29,11 +29,7 @@
 }
 
 body {
-  background:
-    radial-gradient(circle at 8% 9%, rgba(240, 106, 79, 0.16) 0 5px, transparent 6px),
-    radial-gradient(circle at 92% 17%, rgba(245, 197, 37, 0.2) 0 7px, transparent 8px),
-    radial-gradient(900px 430px at 50% -12%, rgba(133, 93, 205, 0.16), transparent 62%),
-    linear-gradient(180deg, #fffdf8 0%, #f7f5ef 68%, #f2f0ea 100%);
+  background: linear-gradient(180deg, #faf8f2 0%, #f7f5ef 72%, #f2f0ea 100%);
   color: var(--color-cream);
   font-family: var(--font-inter), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -120,27 +116,8 @@ body {
   box-shadow: 0 12px 32px rgba(19, 36, 90, 0.07);
 }
 
-.lottery-logo { position: relative; isolation: isolate; }
-.lottery-logo::before,
-.lottery-logo::after {
-  content: "";
-  position: absolute;
-  left: 34%;
-  right: 24%;
-  height: 20px;
-  border-radius: 50%;
-  z-index: -1;
-}
-.lottery-logo::before { top: -5px; border-top: 2px solid #f06a4f; transform: rotate(-4deg); }
-.lottery-logo::after { bottom: -6px; border-bottom: 2px solid #855dcd; transform: rotate(5deg); }
-
 .jackpot-card {
-  background:
-    radial-gradient(circle at 88% 18%, rgba(245,197,37,.35) 0 5px, transparent 6px),
-    radial-gradient(circle at 11% 78%, rgba(240,106,79,.2) 0 7px, transparent 8px),
-    linear-gradient(128deg, transparent 0 72%, rgba(240,106,79,.05) 72% 75%, transparent 75%),
-    radial-gradient(ellipse at 50% 10%, rgba(133,93,205,.12), transparent 58%),
-    #fff;
+  background: #fff;
   border: 1px solid #dfe3ec;
   box-shadow: 0 16px 38px rgba(19, 36, 90, 0.08);
 }
@@ -153,10 +130,7 @@ body {
   position: relative;
   padding: 24px 18px 20px;
   border-radius: 28px;
-  background:
-    radial-gradient(circle at 94% 5%, rgba(245,197,37,.3) 0 4px, transparent 5px),
-    linear-gradient(155deg, rgba(133,93,205,.045), transparent 36%),
-    #fff;
+  background: #fff;
   border: 1px solid #d9d2e2;
   border-top: 4px solid #f06a4f;
   box-shadow: 0 20px 46px rgba(52,32,79,.11);
