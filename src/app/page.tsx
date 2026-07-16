@@ -1423,7 +1423,7 @@ export default function Home() {
                   onClick={() => setSelection({ normals: [], bonusball: 0 })}
                   className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 border border-slate-200 px-3 py-1.5 text-xs text-mut font-heading font-extrabold hover:bg-slate-200 hover:text-royal transition-colors"
                 >
-                  <span aria-hidden="true">×</span> Clear selection
+                  <span aria-hidden="true">×</span> Clear
                 </button>
                 <button
                   onClick={handleShuffleSelection}
@@ -1440,9 +1440,9 @@ export default function Home() {
           {mode === "quick" && (
             <div className="quick-pick-feature">
               <div className="relative z-10 text-center">
-                <span className="quick-pick-kicker">Feeling lucky</span>
+                <span className="quick-pick-kicker">Feeling lucky?</span>
                 <p className="quick-pick-copy">
-                  Let the lottery choose your numbers securely on-chain.
+                  Let the lottery choose your numbers securely onchain.
                 </p>
               </div>
               {!isRecurring && buyPhase !== "success" && buyPhase !== "error" && (
@@ -1541,7 +1541,7 @@ export default function Home() {
 
               {/* Brief item 8b: duplicate-numbers warning in PICK mode with qty > 1 */}
               {mode === "pick" && quantity > 1 && selection.normals.length === 5 && selection.bonusball > 0 && (
-                <p className="text-[10px] text-amber-700/80 mt-2 text-center italic">
+                <p className="text-[10px] text-white/80 mt-2 text-center italic">
                   All {quantity} tickets will carry these same numbers
                 </p>
               )}
