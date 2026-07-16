@@ -1135,8 +1135,8 @@ export default function Home() {
         <GiftReader onGift={setGiftState} />
       </Suspense>
       {/* Header */}
-      <div className="text-center py-2">
-        <Logo scale={1.1} />
+      <div className="text-center py-3">
+        <Logo scale={1.35} />
       </div>
 
       {/* ── PLAY TAB ─────────────────────────────────────────────── */}
@@ -1241,6 +1241,10 @@ export default function Home() {
 
           {/* Play controls — hidden for unconnected users (they can't pick numbers) */}
           {isConnected && (<>
+          <div className="play-ticket-panel space-y-5">
+          <h2 className="text-center text-xl font-heading font-extrabold text-navy">
+            Choose your numbers
+          </h2>
 
           {/* ── Persistent active-subscription banner (brief item 5) ──── */}
           {/* Shows whenever a sub is active, regardless of the Repeat-daily switch. */}
@@ -1334,7 +1338,7 @@ export default function Home() {
                         disabled={selection.normals.length >= 5 && !selected}
                         className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
                           selected
-                            ? "brand-ball ring-2 ring-gold"
+                            ? "brand-ball ring-2 ring-coral"
                             : "brand-ball-empty hover:bg-white/10"
                         } disabled:opacity-30`}
                       >
@@ -1772,6 +1776,7 @@ export default function Home() {
           )}
 
 
+          </div>
           </>)}
 
           {/* ── Wallet button ────────────────────────────────────── */}
@@ -1780,14 +1785,19 @@ export default function Home() {
           {/* ── Buy button (unconnected — triggers connect) ──────── */}
 
           {!isConnected && (
-            <ConnectWallet
-              className="w-full !bg-transparent hover:!bg-transparent !p-0 !rounded-xl"
-              disconnectedLabel={
-                <span className="w-full py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase btn-gold inline-flex items-center justify-center">
-                  Buy a ticket · $1
-                </span>
-              }
-            />
+            <div className="play-ticket-panel">
+              <p className="mb-4 text-center text-sm text-mut">
+                Connect your wallet to pick numbers or start a recurring buy.
+              </p>
+              <ConnectWallet
+                className="w-full !bg-transparent hover:!bg-transparent !p-0 !rounded-xl"
+                disconnectedLabel={
+                  <span className="w-full py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase btn-gold inline-flex items-center justify-center">
+                    Buy a ticket · $1
+                  </span>
+                }
+              />
+            </div>
           )}
 
           {/* Brief item 6: Credit / disclosure footer */}
@@ -2180,7 +2190,7 @@ export default function Home() {
                               ? "brand-ball-gold"
                               : hasResult
                               ? "brand-ball-empty"
-                              : "bg-gold/25 text-gold-light"
+                              : "bg-gold/25 text-navy"
                           }`}
                         >
                           {ticket.bonusball}

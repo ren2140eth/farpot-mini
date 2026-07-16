@@ -65,12 +65,12 @@ body {
 .brand-ball {
   background: #fff;
   color: #34204f;
-  border: 1.5px solid #855dcd;
+  border: 1.5px solid #f06a4f;
   box-shadow: 0 4px 12px rgba(82, 48, 112, 0.1);
 }
 .brand-ball-gold {
   background: #f5c525;
-  color: #34204f;
+  color: #34204f !important;
   border: 1.5px solid #dba914;
   box-shadow: 0 4px 12px rgba(219, 169, 20, 0.18);
 }
@@ -146,8 +146,20 @@ body {
 }
 
 .segmented-control { background: #eef1f7; border: 1px solid #dfe3ec; }
-.segmented-active { background: linear-gradient(135deg, #9b78e0, #855dcd); color: #fff; box-shadow: 0 5px 12px rgba(133,93,205,.2); }
+.segmented-active { background: linear-gradient(135deg, #ff8066, #f06a4f); color: #fff; box-shadow: 0 5px 12px rgba(240,106,79,.22); }
 .soft-panel { background: #fff; border: 1px solid #e1e4ec; box-shadow: 0 8px 24px rgba(19,36,90,.05); }
+
+.play-ticket-panel {
+  position: relative;
+  padding: 22px 18px;
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at 94% 5%, rgba(245,197,37,.3) 0 4px, transparent 5px),
+    linear-gradient(155deg, rgba(133,93,205,.045), transparent 36%),
+    #fff;
+  border: 1px solid #dedbe5;
+  box-shadow: 0 18px 42px rgba(52,32,79,.08);
+}
 
 /* Compatibility bridge for the existing component's dark-theme utilities.
    Keeping this scoped lets us reskin without touching transaction logic. */
