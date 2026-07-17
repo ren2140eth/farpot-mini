@@ -58,6 +58,13 @@ export const JACKPOT_ABI = [
     type: "function",
   },
   {
+    inputs: [{ internalType: "uint256", name: "_drawingId", type: "uint256" }],
+    name: "getDrawingTierPayouts",
+    outputs: [{ internalType: "uint256[12]", name: "", type: "uint256[12]" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
     inputs: [
       {
         components: [

@@ -35,6 +35,7 @@ const APP_URL = "https://farpot.vercel.app";
 interface DrawingState {
   prizePool: bigint;
   ticketPrice: bigint;
+  globalTicketsBought: bigint;
   ballMax: number;
   bonusballMax: number;
   drawingTime: number;
@@ -187,20 +188,6 @@ function formatApiAmount(amount: ApiAmount | null | undefined): string {
   return (Number(amount.amount) / 10 ** amount.decimals).toFixed(2);
 }
 
-// Top prize tier's share of the prize pool, from the latest settled round.
-// Empirically ~0.205 and drifts <0.15% across rounds, so applying it to the
-// live on-chain pool gives the top prize at the honest scale (~$228K, not the
-// ~5x multi-tier pot) while still ticking with every ticket sold.
-function topTierPoolRatio(round: ApiRound | undefined): number | null {
-  const tier = round?.prize_tiers?.find(
-    (t) => t.normal_matches === 5 && t.bonusball_match,
-  );
-  const pool = Number(round?.prize_pool?.amount ?? 0);
-  if (!tier || !(pool > 0)) return null;
-  const ratio = Number(tier.payout.amount) / pool;
-  return ratio > 0 && ratio < 1 ? ratio : null;
-}
-
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -316,11 +303,10 @@ interface SearchUserResult {
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function Odometer({ value }: { value: number }) {
-  // Cents on purpose: at the top-tier scale each $1 ticket moves the value
-  // ~$0.14, so two decimals is what makes individual buys visibly tick.
+  // The contract's jackpot-tier payout does not change on every unique ticket
+  // purchase, so whole dollars avoid implying false per-ticket precision.
   const str = value.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 0,
   });
   // First paint renders every strip at 0; arming on the next frame transitions
   // each digit to its target so the number visibly rolls in on mount.
@@ -494,6 +480,14 @@ export default function Home() {
     query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
   });
 
+  const { data: tierPayouts, refetch: refetchTierPayouts } = useReadContract({
+    address: JACKPOT_ADDRESS,
+    abi: JACKPOT_ABI,
+    functionName: "getDrawingTierPayouts",
+    args: currentDrawingId !== undefined ? [currentDrawingId] : undefined,
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
+  });
+
   const { data: usdcBalance, refetch: refetchUsdcBalance } = useReadContract({
     address: USDC_ADDRESS,
     abi: USDC_ABI,
@@ -524,6 +518,7 @@ export default function Home() {
     return {
       prizePool: (ds.prizePool as bigint) ?? BigInt(0),
       ticketPrice: (ds.ticketPrice as bigint) ?? BigInt(0),
+      globalTicketsBought: (ds.globalTicketsBought as bigint) ?? BigInt(0),
       ballMax: Number(ds.ballMax ?? 0),
       bonusballMax: Number(ds.bonusballMax ?? 0),
       drawingTime: Number(ds.drawingTime ?? 0),
@@ -531,19 +526,14 @@ export default function Home() {
     };
   }, [drawingStateRaw]);
 
-  // Recent settled rounds: social proof strip + the top-tier/pool ratio.
-  // Declared here (not at the results section) because the headline needs it.
+  // Recent settled rounds: social proof strips and results history.
   const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
 
-  // Headline jackpot = top prize at the honest scale, ticking live: the
-  // on-chain prize pool (re-read every 60s, grows with every $1 ticket sold)
-  // scaled by the latest settled round's top-tier share (~20.5%, see
-  // topTierPoolRatio).
-  const jackpotRatio = topTierPoolRatio(recentRounds[0]);
+  // Index 11 is the 5-normal + bonusball jackpot tier. Using the contract's
+  // current-drawing payout avoids estimating it from historical round ratios.
+  const jackpotTierPayout = tierPayouts?.[11];
   const headlineJackpotUsd =
-    drawingState && jackpotRatio != null
-      ? Number(formatUSDC(drawingState.prizePool)) * jackpotRatio
-      : null;
+    jackpotTierPayout !== undefined ? Number(formatUSDC(jackpotTierPayout)) : null;
 
   const isSalesOpen = !drawingState?.jackpotLock;
 
@@ -927,6 +917,7 @@ export default function Home() {
       // Refetch on-chain reads so balance + jackpot update immediately
       refetchUsdcBalance();
       refetchDrawingState();
+      refetchTierPayouts();
       // The exact-amount approval was just consumed by this buy, so on-chain
       // allowance is back to ~0. Refetch it, otherwise a second buy this session
       // reads a stale allowance, skips the now-needed re-approval, and reverts.
@@ -1380,6 +1371,13 @@ export default function Home() {
               </p>
               <p className="display gold-text pulse-gold text-6xl mt-2 tabular-nums">
                 {headlineJackpotUsd != null ? <Odometer value={headlineJackpotUsd} /> : "…"}
+              </p>
+              <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-royal/25 bg-royal/10 px-3 py-1.5 text-xs font-semibold text-mut">
+                <span className="h-1.5 w-1.5 rounded-full bg-wins-green" />
+                <span className="font-bold text-cream tabular-nums">
+                  {drawingState.globalTicketsBought.toLocaleString()}
+                </span>{" "}
+                tickets in today&apos;s draw
               </p>
             </div>
             <div className="grid grid-cols-3 gap-4 text-center">
