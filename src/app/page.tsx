@@ -1207,24 +1207,32 @@ export default function Home() {
     [claimableWins],
   );
 
-  // ── The Sweat: stagger-reveal a freshly settled ticket ───────────
-  // sweatStep counts revealed balls: 0..4 normals, 5 bonus, 6 verdict shown.
-  const [sweatTicketId, setSweatTicketId] = useState<string | null>(null);
+  // ── The Sweat: stagger-reveal freshly settled tickets together ──
+  // sweatStep counts revealed columns shared by the group: 0..4 normals,
+  // 5 bonus, 6 verdict shown. Every fresh ticket from the newest settled draw
+  // advances on the same clock so buying several does not multiply the wait.
+  const [sweatTicketIds, setSweatTicketIds] = useState<Set<string>>(() => new Set());
   const [sweatStep, setSweatStep] = useState(0);
-  const sweatInProgress = sweatTicketId !== null && sweatStep < 7;
+  const sweatInProgress = sweatTicketIds.size > 0 && sweatStep < 7;
 
   // Called with freshly fetched tickets; decides whether a sweat reveal runs.
   const maybeStartSweat = useCallback((tickets: ApiTicket[]) => {
     const settled = tickets.filter((t) => t.matched_normals !== null);
     if (settled.length === 0) return;
     const seen = getSweatedIds();
-    // Only the NEWEST settled ticket ever animates; everything settled is
-    // marked seen so older tickets render instantly, forever.
-    const fresh = seen.has(settled[0].id) ? null : settled[0];
+    const newestFresh = settled.find((ticket) => !seen.has(ticket.id));
+    // Reveal every unseen ticket from the newest newly-settled draw together.
+    // Older history is still marked seen so a first visit does not animate a
+    // long backlog of unrelated rounds.
+    const fresh = newestFresh
+      ? settled.filter(
+          (ticket) => ticket.round_id === newestFresh.round_id && !seen.has(ticket.id),
+        )
+      : [];
     markSweated(settled.map((t) => t.id));
-    if (!fresh) return;
+    if (fresh.length === 0) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    setSweatTicketId(fresh.id);
+    setSweatTicketIds(new Set(fresh.map((ticket) => ticket.id)));
     setSweatStep(0);
   }, []);
 
@@ -1246,13 +1254,13 @@ export default function Home() {
   }, [isConnected, address, resultsRefresh, activeTab, maybeStartSweat]);
 
   useEffect(() => {
-    if (sweatTicketId === null || sweatStep >= 7) return;
+    if (sweatTicketIds.size === 0 || sweatStep >= 7) return;
     const t = setTimeout(
       () => setSweatStep((s) => s + 1),
       sweatStep === 0 ? 750 : 620,
     );
     return () => clearTimeout(t);
-  }, [sweatTicketId, sweatStep]);
+  }, [sweatTicketIds, sweatStep]);
 
   // ── Claim handler ────────────────────────────────────────────────
   const handleClaim = useCallback(
@@ -2406,9 +2414,9 @@ export default function Home() {
                   const bonusHit =
                     ticket.bonusball_match ??
                     (winning ? winning.bonusball === ticket.bonusball : false);
-                  // The Sweat: this ticket's balls reveal one at a time on
-                  // first view. Every other ticket renders fully, instantly.
-                  const isSweating = ticket.id === sweatTicketId;
+                  // The Sweat: all fresh tickets from the newest settled draw
+                  // reveal each ball column together on first view.
+                  const isSweating = sweatTicketIds.has(ticket.id);
                   const ballRevealed = (i: number) => !isSweating || sweatStep > i;
                   const sweatDone = !isSweating || sweatStep >= 7;
 
