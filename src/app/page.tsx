@@ -187,6 +187,20 @@ function formatApiAmount(amount: ApiAmount | null | undefined): string {
   return (Number(amount.amount) / 10 ** amount.decimals).toFixed(2);
 }
 
+// Top prize tier's share of the prize pool, from the latest settled round.
+// Empirically ~0.205 and drifts <0.15% across rounds, so applying it to the
+// live on-chain pool gives the top prize at the honest scale (~$228K, not the
+// ~5x multi-tier pot) while still ticking with every ticket sold.
+function topTierPoolRatio(round: ApiRound | undefined): number | null {
+  const tier = round?.prize_tiers?.find(
+    (t) => t.normal_matches === 5 && t.bonusball_match,
+  );
+  const pool = Number(round?.prize_pool?.amount ?? 0);
+  if (!tier || !(pool > 0)) return null;
+  const ratio = Number(tier.payout.amount) / pool;
+  return ratio > 0 && ratio < 1 ? ratio : null;
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -302,7 +316,12 @@ interface SearchUserResult {
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function Odometer({ value }: { value: number }) {
-  const str = Math.round(value).toLocaleString("en-US");
+  // Cents on purpose: at the top-tier scale each $1 ticket moves the value
+  // ~$0.14, so two decimals is what makes individual buys visibly tick.
+  const str = value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
   // First paint renders every strip at 0; arming on the next frame transitions
   // each digit to its target so the number visibly rolls in on mount.
   const [armed, setArmed] = useState(false);
@@ -512,13 +531,19 @@ export default function Home() {
     };
   }, [drawingStateRaw]);
 
-  // Headline jackpot = the live on-chain prize pool for the current drawing.
-  // It grows with every $1 ticket sold (re-read every 60s), so the Odometer
-  // ticks against real purchases — the most honest live number we have. Whole
-  // dollars only: tickets are $1, so sub-dollar precision is noise.
-  const headlineJackpotUsd = drawingState
-    ? Number(formatUSDC(drawingState.prizePool))
-    : null;
+  // Recent settled rounds: social proof strip + the top-tier/pool ratio.
+  // Declared here (not at the results section) because the headline needs it.
+  const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
+
+  // Headline jackpot = top prize at the honest scale, ticking live: the
+  // on-chain prize pool (re-read every 60s, grows with every $1 ticket sold)
+  // scaled by the latest settled round's top-tier share (~20.5%, see
+  // topTierPoolRatio).
+  const jackpotRatio = topTierPoolRatio(recentRounds[0]);
+  const headlineJackpotUsd =
+    drawingState && jackpotRatio != null
+      ? Number(formatUSDC(drawingState.prizePool)) * jackpotRatio
+      : null;
 
   const isSalesOpen = !drawingState?.jackpotLock;
 
@@ -984,14 +1009,18 @@ export default function Home() {
   }, []);
 
   // ── Social proof: recent rounds (public, no wallet needed) ────────
-  // Brief item 3 — ticket ticker + recent wins strip + fairness line
-  const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
-
-  // Fetch recent settled rounds for social proof (public API — no auth).
+  // Brief item 3 — ticket ticker + recent wins strip + fairness line.
+  // Re-polled every 60s so the headline's top-tier ratio follows a round
+  // settling while the app is open. (recentRounds state lives up by the
+  // headline derivation, which consumes it.)
   useEffect(() => {
-    fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
-      if (res) setRecentRounds(res.data.filter((r) => r.status === "settled"));
-    });
+    const pull = () =>
+      fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
+        if (res) setRecentRounds(res.data.filter((r) => r.status === "settled"));
+      });
+    pull();
+    const interval = setInterval(pull, 60_000);
+    return () => clearInterval(interval);
   }, []);
 
   // ── Subscription allowance (for recurring mode) ────────────────────
