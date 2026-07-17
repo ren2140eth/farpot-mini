@@ -182,17 +182,6 @@ function jackpotOdds(ballMax: number, bonusballMax: number): number {
   return Math.round(combos) * bonusballMax;
 }
 
-// The headline "jackpot" is the top prize tier (match all 5 + bonusball) — NOT
-// prize_pool, which is the full multi-tier pot (~5x larger) and overstates what a
-// player actually wins. prize_tiers is only populated on settled rounds, but the
-// pool is stable day-to-day so the latest settled round tracks the live jackpot.
-function topTierPayoutUsd(round: ApiRound | undefined): number | null {
-  const tier = round?.prize_tiers?.find(
-    (t) => t.normal_matches === 5 && t.bonusball_match,
-  );
-  return tier ? Number(formatUSDC(BigInt(tier.payout.amount))) : null;
-}
-
 function formatApiAmount(amount: ApiAmount | null | undefined): string {
   if (!amount) return "0";
   return (Number(amount.amount) / 10 ** amount.decimals).toFixed(2);
@@ -346,117 +335,6 @@ function Odometer({ value }: { value: number }) {
   );
 }
 
-// ── Scratch foil — post-buy reveal of quick-pick numbers ───────────
-// Mounted over the ticket preview once the buy succeeds. The numbers under
-// the foil are whatever the reveal flow shows (still cycling until the API
-// confirms, then settled), so scratching never fabricates a result.
-// Reduced-motion (or double-click) reveals on a single tap.
-function ScratchFoil({ onRevealed }: { onRevealed: () => void }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const doneRef = useRef(false);
-  const movesRef = useRef(0);
-  const scratchingRef = useRef(false);
-  const [fading, setFading] = useState(false);
-
-  const reveal = useCallback(() => {
-    if (doneRef.current) return;
-    doneRef.current = true;
-    setFading(true);
-    setTimeout(onRevealed, 450);
-  }, [onRevealed]);
-
-  // Paint the gold foil once, at device-pixel resolution
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(rect.width * dpr));
-    canvas.height = Math.max(1, Math.round(rect.height * dpr));
-    const g = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-    g.addColorStop(0, "#ffd94f");
-    g.addColorStop(0.55, "#e2ad0b");
-    g.addColorStop(1, "#c8920a");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
-    ctx.lineWidth = 6 * dpr;
-    for (let x = -canvas.height; x < canvas.width; x += 34 * dpr) {
-      ctx.beginPath();
-      ctx.moveTo(x, canvas.height + 8);
-      ctx.lineTo(x + canvas.height, -8);
-      ctx.stroke();
-    }
-    ctx.fillStyle = "rgba(63, 31, 104, 0.9)";
-    ctx.font = `900 ${Math.round(12 * dpr)}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("SCRATCH TO REVEAL ✦", canvas.width / 2, canvas.height / 2);
-  }, []);
-
-  const checkCleared = useCallback(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx || doneRef.current) return;
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    let clear = 0;
-    let total = 0;
-    for (let i = 3; i < data.length; i += 64) {
-      total++;
-      if (data[i] < 40) clear++;
-    }
-    if (total > 0 && clear / total > 0.5) reveal();
-  }, [reveal]);
-
-  const scratchAt = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const r = canvas.getBoundingClientRect();
-    if (r.width === 0) return;
-    const scale = canvas.width / r.width;
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.beginPath();
-    ctx.arc(
-      (e.clientX - r.left) * scale,
-      (e.clientY - r.top) * scale,
-      20 * scale,
-      0,
-      Math.PI * 2,
-    );
-    ctx.fill();
-    movesRef.current += 1;
-    if (movesRef.current % 10 === 0) checkCleared();
-  };
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className={`scratch-foil ${fading ? "scratch-foil-cleared" : ""}`}
-      role="button"
-      aria-label="Scratch to reveal your numbers (double-tap to reveal instantly)"
-      onDoubleClick={reveal}
-      onPointerDown={(e) => {
-        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-          reveal();
-          return;
-        }
-        scratchingRef.current = true;
-        e.currentTarget.setPointerCapture(e.pointerId);
-        scratchAt(e);
-      }}
-      onPointerMove={(e) => {
-        if (scratchingRef.current) scratchAt(e);
-      }}
-      onPointerUp={() => {
-        scratchingRef.current = false;
-        checkCleared();
-      }}
-    />
-  );
-}
-
 // ── Shared FAR ★ POT lockup from the approved brand mockup ─────────
 function Logo({ scale = 1 }: { scale?: number }) {
   return (
@@ -586,6 +464,7 @@ export default function Home() {
     address: JACKPOT_ADDRESS,
     abi: JACKPOT_ABI,
     functionName: "currentDrawingId",
+    query: { refetchInterval: 60_000 },
   });
 
   const { data: drawingStateRaw, isLoading: loadingState, refetch: refetchDrawingState } = useReadContract({
@@ -593,7 +472,7 @@ export default function Home() {
     abi: JACKPOT_ABI,
     functionName: "getDrawingState",
     args: currentDrawingId !== undefined ? [currentDrawingId] : undefined,
-    query: { enabled: currentDrawingId !== undefined },
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
   });
 
   const { data: usdcBalance, refetch: refetchUsdcBalance } = useReadContract({
@@ -633,9 +512,13 @@ export default function Home() {
     };
   }, [drawingStateRaw]);
 
-  // Headline jackpot = top prize tier from the latest settled round (see
-  // topTierPayoutUsd). Set by the recent-rounds effect below; null until loaded.
-  const [headlineJackpotUsd, setHeadlineJackpotUsd] = useState<number | null>(null);
+  // Headline jackpot = the live on-chain prize pool for the current drawing.
+  // It grows with every $1 ticket sold (re-read every 60s), so the Odometer
+  // ticks against real purchases — the most honest live number we have. Whole
+  // dollars only: tickets are $1, so sub-dollar precision is noise.
+  const headlineJackpotUsd = drawingState
+    ? Number(formatUSDC(drawingState.prizePool))
+    : null;
 
   const isSalesOpen = !drawingState?.jackpotLock;
 
@@ -674,13 +557,6 @@ export default function Home() {
     }, 80); // fast cycle for slot-machine feel
     return () => clearInterval(interval);
   }, [isShuffling, drawingState]);
-
-  // ── Scratch foil derived state ────────────────────────────────────
-  // The foil covers the ticket preview once a quick-pick buy succeeds;
-  // scratching it off is the reveal. Reset at buy start and in handleReset —
-  // every path into a fresh success runs through one of those.
-  const [scratched, setScratched] = useState(false);
-  const showFoil = mode === "quick" && buyPhase === "success" && !scratched;
 
   // ── Countdown timer ──────────────────────────────────────────────
   // isGoldenHour: final hour before the draw (and the draw itself) flips the
@@ -923,7 +799,6 @@ export default function Home() {
 
     try {
       setErrorMessage("");
-      setScratched(false);
 
       // Step 1: Approve USDC spending if needed
       if (needsApproval) {
@@ -1106,7 +981,6 @@ export default function Home() {
     setResolvedQuickPick(null);
     setIsShuffling(false);
     setQuickPickPending(false);
-    setScratched(false);
   }, []);
 
   // ── Social proof: recent rounds (public, no wallet needed) ────────
@@ -1114,21 +988,10 @@ export default function Home() {
   const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
 
   // Fetch recent settled rounds for social proof (public API — no auth).
-  // Re-poll every 60s so the headline jackpot rolls to a fresh value when a
-  // round settles while the app is open (the Odometer animates the change).
   useEffect(() => {
-    const pull = () =>
-      fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
-        if (res) {
-          const settled = res.data.filter((r) => r.status === "settled");
-          setRecentRounds(settled);
-          const jackpot = topTierPayoutUsd(settled[0]);
-          if (jackpot != null) setHeadlineJackpotUsd(jackpot);
-        }
-      });
-    pull();
-    const interval = setInterval(pull, 60_000);
-    return () => clearInterval(interval);
+    fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
+      if (res) setRecentRounds(res.data.filter((r) => r.status === "settled"));
+    });
   }, []);
 
   // ── Subscription allowance (for recurring mode) ────────────────────
@@ -1746,8 +1609,8 @@ export default function Home() {
                 </button>
               )}
               <p className="relative z-10 -mt-3 text-center text-[10px] text-white/60">
-                1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()} for
-                the jackpot — someone&apos;s gotta win 🍀
+                1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()}{" "}
+                for the jackpot — someone&apos;s gotta win 🍀
               </p>
             </div>
           )}
@@ -1827,10 +1690,6 @@ export default function Home() {
                 </p>
               )}
 
-              {/* The Scratcher: gold foil over the freshly-minted ticket. The
-                  numbers underneath keep resolving as usual; scratching (or a
-                  tap, for reduced motion) is what reveals them. */}
-              {showFoil && <ScratchFoil onRevealed={() => setScratched(true)} />}
             </div>
           ) : null}
 
