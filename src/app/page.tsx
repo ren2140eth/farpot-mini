@@ -316,7 +316,12 @@ interface SearchUserResult {
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function Odometer({ value }: { value: number }) {
-  const str = Math.round(value).toLocaleString("en-US");
+  // Cents on purpose: at the top-tier scale each $1 ticket moves the value
+  // ~$0.14, so two decimals is what makes individual buys visibly tick.
+  const str = value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
   // First paint renders every strip at 0; arming on the next frame transitions
   // each digit to its target so the number visibly rolls in on mount.
   const [armed, setArmed] = useState(false);
@@ -533,7 +538,7 @@ export default function Home() {
   // Headline jackpot = top prize at the honest scale, ticking live: the
   // on-chain prize pool (re-read every 60s, grows with every $1 ticket sold)
   // scaled by the latest settled round's top-tier share (~20.5%, see
-  // topTierPoolRatio). Whole dollars — sub-dollar precision is noise.
+  // topTierPoolRatio).
   const jackpotRatio = topTierPoolRatio(recentRounds[0]);
   const headlineJackpotUsd =
     drawingState && jackpotRatio != null
