@@ -182,17 +182,6 @@ function jackpotOdds(ballMax: number, bonusballMax: number): number {
   return Math.round(combos) * bonusballMax;
 }
 
-// The headline "jackpot" is the top prize tier (match all 5 + bonusball) — NOT
-// prize_pool, which is the full multi-tier pot (~5x larger) and overstates what a
-// player actually wins. prize_tiers is only populated on settled rounds, but the
-// pool is stable day-to-day so the latest settled round tracks the live jackpot.
-function topTierPayoutUsd(round: ApiRound | undefined): number | null {
-  const tier = round?.prize_tiers?.find(
-    (t) => t.normal_matches === 5 && t.bonusball_match,
-  );
-  return tier ? Number(formatUSDC(BigInt(tier.payout.amount))) : null;
-}
-
 function formatApiAmount(amount: ApiAmount | null | undefined): string {
   if (!amount) return "0";
   return (Number(amount.amount) / 10 ** amount.decimals).toFixed(2);
@@ -313,10 +302,7 @@ interface SearchUserResult {
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function Odometer({ value }: { value: number }) {
-  const str = value.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  const str = Math.round(value).toLocaleString("en-US");
   // First paint renders every strip at 0; arming on the next frame transitions
   // each digit to its target so the number visibly rolls in on mount.
   const [armed, setArmed] = useState(false);
@@ -478,6 +464,7 @@ export default function Home() {
     address: JACKPOT_ADDRESS,
     abi: JACKPOT_ABI,
     functionName: "currentDrawingId",
+    query: { refetchInterval: 60_000 },
   });
 
   const { data: drawingStateRaw, isLoading: loadingState, refetch: refetchDrawingState } = useReadContract({
@@ -485,7 +472,7 @@ export default function Home() {
     abi: JACKPOT_ABI,
     functionName: "getDrawingState",
     args: currentDrawingId !== undefined ? [currentDrawingId] : undefined,
-    query: { enabled: currentDrawingId !== undefined },
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
   });
 
   const { data: usdcBalance, refetch: refetchUsdcBalance } = useReadContract({
@@ -525,9 +512,13 @@ export default function Home() {
     };
   }, [drawingStateRaw]);
 
-  // Headline jackpot = top prize tier from the latest settled round (see
-  // topTierPayoutUsd). Set by the recent-rounds effect below; null until loaded.
-  const [headlineJackpotUsd, setHeadlineJackpotUsd] = useState<number | null>(null);
+  // Headline jackpot = the live on-chain prize pool for the current drawing.
+  // It grows with every $1 ticket sold (re-read every 60s), so the Odometer
+  // ticks against real purchases — the most honest live number we have. Whole
+  // dollars only: tickets are $1, so sub-dollar precision is noise.
+  const headlineJackpotUsd = drawingState
+    ? Number(formatUSDC(drawingState.prizePool))
+    : null;
 
   const isSalesOpen = !drawingState?.jackpotLock;
 
@@ -997,21 +988,10 @@ export default function Home() {
   const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
 
   // Fetch recent settled rounds for social proof (public API — no auth).
-  // Re-poll every 60s so the headline jackpot rolls to a fresh value when a
-  // round settles while the app is open (the Odometer animates the change).
   useEffect(() => {
-    const pull = () =>
-      fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
-        if (res) {
-          const settled = res.data.filter((r) => r.status === "settled");
-          setRecentRounds(settled);
-          const jackpot = topTierPayoutUsd(settled[0]);
-          if (jackpot != null) setHeadlineJackpotUsd(jackpot);
-        }
-      });
-    pull();
-    const interval = setInterval(pull, 60_000);
-    return () => clearInterval(interval);
+    fetchApi<ApiRound>("/rounds?limit=10").then((res) => {
+      if (res) setRecentRounds(res.data.filter((r) => r.status === "settled"));
+    });
   }, []);
 
   // ── Subscription allowance (for recurring mode) ────────────────────
