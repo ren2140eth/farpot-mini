@@ -49,6 +49,7 @@ CLAUDE.md
 /branding/
 /docs/briefs/
 *-proof.mjs
+*-proof.ts
 *.internal.*
 NOTES.md
 TODO.md
