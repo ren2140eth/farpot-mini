@@ -1713,9 +1713,13 @@ export default function Home() {
               </div>
 
               {/* Brief item 8b: duplicate-numbers warning in PICK mode with qty > 1 */}
-              {mode === "pick" && quantity > 1 && selection.normals.length === 5 && selection.bonusball > 0 && (
+              {mode === "pick" && (isRecurring || quantity > 1) && selection.normals.length === 5 && selection.bonusball > 0 && (
                 <p className="text-[10px] text-white/80 mt-2 text-center italic">
-                  All {quantity} tickets will carry these same numbers
+                  {isRecurring
+                    ? subTicketsPerDay === 1
+                      ? `These numbers will be used for your daily ticket for ${subDuration} days`
+                      : `These numbers will be used for all ${subTicketsPerDay} daily tickets for ${subDuration} days`
+                    : `All ${quantity} tickets will carry these same numbers`}
                 </p>
               )}
 

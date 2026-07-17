@@ -27,7 +27,7 @@ export const minikitConfig = {
       "Gift and buy lottery tickets on Base, powered by Megapot. 1 USDC per ticket, daily drawings, real prizes.",
     screenshotUrls: [`${ROOT_URL}/screenshot-v4.png`],
     iconUrl: `${ROOT_URL}/icon-v10.png`,
-    splashImageUrl: `${ROOT_URL}/splash-v7.png`,
+    splashImageUrl: `${ROOT_URL}/splash-v8.png`,
     splashBackgroundColor: "#faf8f2",
     homeUrl: ROOT_URL,
     primaryCategory: "finance",
