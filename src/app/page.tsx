@@ -313,7 +313,10 @@ interface SearchUserResult {
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function Odometer({ value }: { value: number }) {
-  const str = Math.round(value).toLocaleString("en-US");
+  const str = value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
   // First paint renders every strip at 0; arming on the next frame transitions
   // each digit to its target so the number visibly rolls in on mount.
   const [armed, setArmed] = useState(false);
@@ -343,117 +346,6 @@ function Odometer({ value }: { value: number }) {
         ),
       )}
     </span>
-  );
-}
-
-// ── Scratch foil — post-buy reveal of quick-pick numbers ───────────
-// Mounted over the ticket preview once the buy succeeds. The numbers under
-// the foil are whatever the reveal flow shows (still cycling until the API
-// confirms, then settled), so scratching never fabricates a result.
-// Reduced-motion (or double-click) reveals on a single tap.
-function ScratchFoil({ onRevealed }: { onRevealed: () => void }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const doneRef = useRef(false);
-  const movesRef = useRef(0);
-  const scratchingRef = useRef(false);
-  const [fading, setFading] = useState(false);
-
-  const reveal = useCallback(() => {
-    if (doneRef.current) return;
-    doneRef.current = true;
-    setFading(true);
-    setTimeout(onRevealed, 450);
-  }, [onRevealed]);
-
-  // Paint the gold foil once, at device-pixel resolution
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(rect.width * dpr));
-    canvas.height = Math.max(1, Math.round(rect.height * dpr));
-    const g = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-    g.addColorStop(0, "#ffd94f");
-    g.addColorStop(0.55, "#e2ad0b");
-    g.addColorStop(1, "#c8920a");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
-    ctx.lineWidth = 6 * dpr;
-    for (let x = -canvas.height; x < canvas.width; x += 34 * dpr) {
-      ctx.beginPath();
-      ctx.moveTo(x, canvas.height + 8);
-      ctx.lineTo(x + canvas.height, -8);
-      ctx.stroke();
-    }
-    ctx.fillStyle = "rgba(63, 31, 104, 0.9)";
-    ctx.font = `900 ${Math.round(12 * dpr)}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("SCRATCH TO REVEAL ✦", canvas.width / 2, canvas.height / 2);
-  }, []);
-
-  const checkCleared = useCallback(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx || doneRef.current) return;
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    let clear = 0;
-    let total = 0;
-    for (let i = 3; i < data.length; i += 64) {
-      total++;
-      if (data[i] < 40) clear++;
-    }
-    if (total > 0 && clear / total > 0.5) reveal();
-  }, [reveal]);
-
-  const scratchAt = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const r = canvas.getBoundingClientRect();
-    if (r.width === 0) return;
-    const scale = canvas.width / r.width;
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.beginPath();
-    ctx.arc(
-      (e.clientX - r.left) * scale,
-      (e.clientY - r.top) * scale,
-      20 * scale,
-      0,
-      Math.PI * 2,
-    );
-    ctx.fill();
-    movesRef.current += 1;
-    if (movesRef.current % 10 === 0) checkCleared();
-  };
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className={`scratch-foil ${fading ? "scratch-foil-cleared" : ""}`}
-      role="button"
-      aria-label="Scratch to reveal your numbers (double-tap to reveal instantly)"
-      onDoubleClick={reveal}
-      onPointerDown={(e) => {
-        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-          reveal();
-          return;
-        }
-        scratchingRef.current = true;
-        e.currentTarget.setPointerCapture(e.pointerId);
-        scratchAt(e);
-      }}
-      onPointerMove={(e) => {
-        if (scratchingRef.current) scratchAt(e);
-      }}
-      onPointerUp={() => {
-        scratchingRef.current = false;
-        checkCleared();
-      }}
-    />
   );
 }
 
@@ -674,13 +566,6 @@ export default function Home() {
     }, 80); // fast cycle for slot-machine feel
     return () => clearInterval(interval);
   }, [isShuffling, drawingState]);
-
-  // ── Scratch foil derived state ────────────────────────────────────
-  // The foil covers the ticket preview once a quick-pick buy succeeds;
-  // scratching it off is the reveal. Reset at buy start and in handleReset —
-  // every path into a fresh success runs through one of those.
-  const [scratched, setScratched] = useState(false);
-  const showFoil = mode === "quick" && buyPhase === "success" && !scratched;
 
   // ── Countdown timer ──────────────────────────────────────────────
   // isGoldenHour: final hour before the draw (and the draw itself) flips the
@@ -923,7 +808,6 @@ export default function Home() {
 
     try {
       setErrorMessage("");
-      setScratched(false);
 
       // Step 1: Approve USDC spending if needed
       if (needsApproval) {
@@ -1106,7 +990,6 @@ export default function Home() {
     setResolvedQuickPick(null);
     setIsShuffling(false);
     setQuickPickPending(false);
-    setScratched(false);
   }, []);
 
   // ── Social proof: recent rounds (public, no wallet needed) ────────
@@ -1746,8 +1629,8 @@ export default function Home() {
                 </button>
               )}
               <p className="relative z-10 -mt-3 text-center text-[10px] text-white/60">
-                1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()} for
-                the jackpot — someone&apos;s gotta win 🍀
+                1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()}{" "}
+                for the jackpot — someone&apos;s gotta win 🍀
               </p>
             </div>
           )}
@@ -1827,10 +1710,6 @@ export default function Home() {
                 </p>
               )}
 
-              {/* The Scratcher: gold foil over the freshly-minted ticket. The
-                  numbers underneath keep resolving as usual; scratching (or a
-                  tap, for reduced motion) is what reveals them. */}
-              {showFoil && <ScratchFoil onRevealed={() => setScratched(true)} />}
             </div>
           ) : null}
 
