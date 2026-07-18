@@ -29,6 +29,7 @@ const SOURCE = stringToHex("megapot-mini", { size: 32 });
 const REFERRAL_SPLIT = BigInt(1_000_000_000_000_000_000);
 const USDC_DECIMALS = 6;
 const APP_URL = "https://farpot.vercel.app";
+const MAX_TICKETS_PER_PURCHASE = 99;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -1666,12 +1667,9 @@ export default function Home() {
                     </button>
                     <span className="text-white font-heading font-extrabold w-8 text-center">{quantity}</span>
                     <button
-                      onClick={() => {
-                        const maxTickets = usdcBalance
-                          ? Number(usdcBalance / drawingState.ticketPrice)
-                          : 99;
-                        setQuantity(Math.min(maxTickets, quantity + 1));
-                      }}
+                      onClick={() =>
+                        setQuantity(Math.min(MAX_TICKETS_PER_PURCHASE, quantity + 1))
+                      }
                       className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
                     >
                       +
@@ -2074,12 +2072,9 @@ export default function Home() {
                 </button>
                 <span className="text-white font-heading font-extrabold w-8 text-center">{quantity}</span>
                 <button
-                  onClick={() => {
-                    const maxTickets = usdcBalance
-                      ? Number(usdcBalance / drawingState.ticketPrice)
-                      : 99;
-                    setQuantity(Math.min(maxTickets, quantity + 1));
-                  }}
+                  onClick={() =>
+                    setQuantity(Math.min(MAX_TICKETS_PER_PURCHASE, quantity + 1))
+                  }
                   className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
                 >
                   +
