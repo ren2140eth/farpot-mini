@@ -451,13 +451,6 @@ export default function Home() {
     }
   }, [giftState.address]);
 
-  // Gift tab always uses quick-pick (random numbers assigned on-chain)
-  useEffect(() => {
-    if (activeTab === "gift") {
-      setMode("quick");
-    }
-  }, [activeTab]);
-
   // ── Plain gift search state ────────────────────────────────
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchUserResult[]>([]);
@@ -496,11 +489,14 @@ export default function Home() {
     query: { enabled: !!address },
   });
 
-  // ── Mode / allowance (play + gift tab) ────────────────────────────
-  const [mode, setMode] = useState<"pick" | "quick">("pick");
-
-  const targetContract =
-    mode === "quick" ? RANDOM_TICKET_BUYER_ADDRESS : JACKPOT_ADDRESS;
+  // ── Purchase route / allowance (play + gift tab) ──────────────────
+  // Small one-time Play orders are editable slips. Large orders and gifts use
+  // RandomTicketBuyer so the contract assigns every combination on-chain.
+  const [quantity, setQuantity] = useState(1);
+  const purchaseUsesOnchainRandom = quantity > 10 || activeTab === "gift";
+  const targetContract = purchaseUsesOnchainRandom
+    ? RANDOM_TICKET_BUYER_ADDRESS
+    : JACKPOT_ADDRESS;
 
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
     address: USDC_ADDRESS,
@@ -538,13 +534,10 @@ export default function Home() {
   const isSalesOpen = !drawingState?.jackpotLock;
 
   // ── Play tab state ───────────────────────────────────────────────
-  const [selection, setSelection] = useState<TicketSelection>({
-    normals: [],
-    bonusball: 0,
-  });
-  // Quantity presets: 1 / 5 / 10 / Custom (default 5, per brief item 1)
-  const [qtyPreset, setQtyPreset] = useState<QtyPreset>("5");
-  const [quantity, setQuantity] = useState(5);
+  const [ticketSelections, setTicketSelections] = useState<TicketSelection[]>([]);
+  const [editingTicketIndex, setEditingTicketIndex] = useState<number | null>(null);
+  // Quantity presets: 1 / 5 / 10 / Custom.
+  const [qtyPreset, setQtyPreset] = useState<QtyPreset>("1");
   const [buyPhase, setBuyPhase] = useState<BuyPhase>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [countdown, setCountdown] = useState("--:--:--");
@@ -560,6 +553,23 @@ export default function Home() {
   // numbers from the API (indexer lag / no baseline). We must never show a stale
   // or other ticket's numbers as "yours" — fall back to pointing at Results.
   const [quickPickPending, setQuickPickPending] = useState(false);
+
+  // Keep a distinct shuffled selection ready for every editable slip. Shrinking
+  // quantity intentionally preserves hidden selections so increasing it again
+  // does not unexpectedly replace a user's earlier choices.
+  useEffect(() => {
+    if (!drawingState || quantity > 10) return;
+    const timer = window.setTimeout(() => {
+      setTicketSelections((current) => {
+        if (current.length >= quantity) return current;
+        const additions = Array.from({ length: quantity - current.length }, () =>
+          generateQuickPick(drawingState.ballMax, drawingState.bonusballMax),
+        );
+        return [...current, ...additions];
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [drawingState, quantity]);
 
   // Slot-machine shuffle effect — cycles random numbers while isShuffling is true
   useEffect(() => {
@@ -670,9 +680,14 @@ export default function Home() {
   }, [allowance, totalCost]);
 
   const isValidSelection = useMemo(() => {
-    if (mode === "quick") return drawingState !== null;
-    return selection.normals.length === 5 && selection.bonusball > 0;
-  }, [mode, selection, drawingState]);
+    if (purchaseUsesOnchainRandom) return drawingState !== null;
+    return (
+      ticketSelections.length >= quantity &&
+      ticketSelections
+        .slice(0, quantity)
+        .every((ticket) => ticket.normals.length === 5 && ticket.bonusball > 0)
+    );
+  }, [purchaseUsesOnchainRandom, ticketSelections, quantity, drawingState]);
 
   const canBuy =
     isConnected &&
@@ -765,41 +780,52 @@ export default function Home() {
 
   // ── Handlers ─────────────────────────────────────────────────────
 
-  const handleShuffleSelection = useCallback(() => {
+  const handleShuffleSelections = useCallback(() => {
     if (!drawingState) return;
-    setSelection(generateQuickPick(drawingState.ballMax, drawingState.bonusballMax));
-    setMode("pick");
-  }, [drawingState]);
+    haptics.impact();
+    setTicketSelections((current) => {
+      const next = [...current];
+      for (let index = 0; index < Math.min(quantity, 10); index += 1) {
+        next[index] = generateQuickPick(drawingState.ballMax, drawingState.bonusballMax);
+      }
+      return next;
+    });
+  }, [drawingState, quantity]);
 
   const toggleBall = useCallback(
     (num: number) => {
+      if (editingTicketIndex === null) return;
       haptics.select();
-      const isSelected = selection.normals.includes(num);
-      const newNormals = isSelected
-        ? selection.normals.filter((n) => n !== num)
-        : selection.normals.length < 5
-        ? [...selection.normals, num].sort((a, b) => a - b)
-        : selection.normals;
-      setSelection({ ...selection, normals: newNormals });
+      setTicketSelections((current) =>
+        current.map((ticket, index) => {
+          if (index !== editingTicketIndex) return ticket;
+          const isSelected = ticket.normals.includes(num);
+          const normals = isSelected
+            ? ticket.normals.filter((n) => n !== num)
+            : ticket.normals.length < 5
+              ? [...ticket.normals, num].sort((a, b) => a - b)
+              : ticket.normals;
+          return { ...ticket, normals };
+        }),
+      );
     },
-    [selection],
+    [editingTicketIndex],
   );
 
   const toggleBonus = useCallback(
     (num: number) => {
+      if (editingTicketIndex === null) return;
       haptics.select();
-      setSelection({
-        ...selection,
-        bonusball: selection.bonusball === num ? 0 : num,
-      });
+      setTicketSelections((current) =>
+        current.map((ticket, index) =>
+          index === editingTicketIndex
+            ? { ...ticket, bonusball: ticket.bonusball === num ? 0 : num }
+            : ticket,
+        ),
+      );
     },
-    [selection],
+    [editingTicketIndex],
   );
-
-  const switchMode = useCallback((newMode: "pick" | "quick") => {
-    setMode(newMode);
-    setSelection({ normals: [], bonusball: 0 });
-  }, []);
 
   // Intentionally NOT wrapped in useCallback — a plain async function reads
   // fresh closure values (quantity, totalCost, needsApproval) from the current
@@ -838,15 +864,10 @@ export default function Home() {
       // Estimate gas with 1.5× buffer — RandomTicketBuyer has a heavy internal
       // call that OOGs at the bare estimate (see tx c903…b6fd on Base).
       const buyArgs =
-        mode === "quick"
+        purchaseUsesOnchainRandom
           ? ([BigInt(quantity), recipient, [REFERRAL_WALLET], [REFERRAL_SPLIT], SOURCE] as const)
-          : (() => {
-              const tickets: TicketSelection[] = Array.from(
-                { length: quantity },
-                () => ({ ...selection }),
-              );
-              return [
-                tickets.map((t) => ({
+          : ([
+                ticketSelections.slice(0, quantity).map((t) => ({
                   normals: t.normals,
                   bonusball: t.bonusball,
                 })),
@@ -854,11 +875,10 @@ export default function Home() {
                 [REFERRAL_WALLET],
                 [REFERRAL_SPLIT],
                 SOURCE,
-              ] as const;
-            })();
+              ] as const);
 
-      const buyTarget = mode === "quick" ? RANDOM_TICKET_BUYER_ADDRESS : JACKPOT_ADDRESS;
-      const buyAbi = mode === "quick" ? RANDOM_TICKET_BUYER_ABI : JACKPOT_ABI;
+      const buyTarget = purchaseUsesOnchainRandom ? RANDOM_TICKET_BUYER_ADDRESS : JACKPOT_ADDRESS;
+      const buyAbi = purchaseUsesOnchainRandom ? RANDOM_TICKET_BUYER_ABI : JACKPOT_ABI;
 
       // Encode calldata so we can estimate gas before signing
       const buyCalldata = encodeFunctionData({
@@ -884,7 +904,7 @@ export default function Home() {
       // couldn't establish a baseline → the reveal is skipped for the safe fallback.
       let preBuyOk = false;
       let preBuySig: string | null = null;
-      if (mode === "quick") {
+      if (purchaseUsesOnchainRandom) {
         try {
           const snapAddr = giftState.address ?? address;
           const snap = await fetch(`${MEGAPOT_API_BASE}/wallets/${snapAddr}/tickets?limit=1`);
@@ -928,7 +948,7 @@ export default function Home() {
       // For quick-pick: reveal the REAL assigned numbers, but only once a ticket
       // NEWER than the pre-mint baseline is indexed. Otherwise fall back to a
       // "see Results" pointer — never show stale or fabricated numbers as yours.
-      if (mode === "quick") {
+      if (purchaseUsesOnchainRandom) {
         setResolvedQuickPick(null);
         setQuickPickPending(false);
         if (!preBuyOk) {
@@ -1057,16 +1077,9 @@ export default function Home() {
       const ticketsPerDay = BigInt(subTicketsPerDay);
       const totalDays = BigInt(subDuration);
 
-      // Build static tickets if in pick mode, empty for quick pick
-      const staticTickets =
-        mode === "pick" && selection.normals.length === 5 && selection.bonusball > 0
-          ? Array.from({ length: Number(ticketsPerDay) }, () => ({
-              normals: [...selection.normals],
-              bonusball: selection.bonusball,
-            }))
-          : [];
-
-      const dynamicCount = staticTickets.length > 0 ? BigInt(0) : ticketsPerDay;
+      // Recurring buys always request fresh on-chain random combinations.
+      const staticTickets: TicketSelection[] = [];
+      const dynamicCount = ticketsPerDay;
 
       const subHash = await writeContract(config, {
         address: AUTO_SUBSCRIPTION_ADDRESS,
@@ -1369,7 +1382,7 @@ export default function Home() {
               <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
                 Today&apos;s jackpot
               </p>
-              <p className="display gold-text pulse-gold text-6xl mt-2 tabular-nums">
+              <p className="jackpot-headline display gold-text pulse-gold text-6xl mt-2 tabular-nums">
                 {headlineJackpotUsd != null ? <Odometer value={headlineJackpotUsd} /> : "…"}
               </p>
               <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-royal/25 bg-royal/10 px-3 py-1.5 text-xs font-semibold text-mut">
@@ -1458,7 +1471,7 @@ export default function Home() {
           {isConnected && (<>
           <div className="play-ticket-panel space-y-5">
           <h2 className="text-center text-xl font-heading font-extrabold text-navy">
-            Choose your numbers
+            Your tickets
           </h2>
 
           {/* ── Persistent active-subscription banner (brief item 5) ──── */}
@@ -1507,230 +1520,99 @@ export default function Home() {
             </div>
           )}
 
-          {/* ── Pick / Quick mode toggle (always shown; carries into recurring) ── */}
-          <div className="segmented-control flex gap-1 p-1 rounded-xl">
-            <button
-              onClick={() => switchMode("pick")}
-              className={`flex-1 py-2.5 rounded-lg text-sm font-heading font-extrabold tracking-wide transition-colors ${
-                mode === "pick"
-                  ? "segmented-active"
-                  : "text-mut hover:text-navy"
-              }`}
-            >
-              PICK NUMBERS
-            </button>
-            <button
-              onClick={() => switchMode("quick")}
-              className={`quick-pick-tab flex-1 py-2.5 rounded-lg text-sm font-heading font-extrabold tracking-wide transition-all ${
-                mode === "quick"
-                  ? "quick-pick-tab-active"
-                  : "text-mut hover:text-navy"
-              }`}
-            >
-              QUICK PICK
-            </button>
-          </div>
-
-          {/* ── Number picker (pick mode) ─────────────────────────── */}
-
-          {mode === "pick" && (
-            <div className="space-y-4">
-              {/* Normal balls */}
-              <div>
-                <p className="text-mut text-sm mb-2">
-                  Pick 5 numbers ({selection.normals.length}/5)
-                </p>
-                <div className="grid grid-cols-10 gap-1.5">
-                  {Array.from(
-                    { length: drawingState.ballMax },
-                    (_, i) => i + 1,
-                  ).map((num) => {
-                    const selected = selection.normals.includes(num);
-                    return (
-                      <button
-                        key={num}
-                        onClick={() => toggleBall(num)}
-                        disabled={selection.normals.length >= 5 && !selected}
-                        className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
-                          selected
-                            ? "brand-ball ring-2 ring-coral ball-pop"
-                            : "brand-ball-empty hover:bg-white/10"
-                        } disabled:opacity-30`}
-                      >
-                        {num}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Bonus ball */}
-              <div>
-                <p className="text-mut text-sm mb-2">
-                  Pick 1 bonus{" "}
-                  {selection.bonusball > 0 ? `(✓ ${selection.bonusball})` : "(none)"}
-                </p>
-                <div className="grid grid-cols-10 gap-1.5">
-                  {Array.from(
-                    { length: drawingState.bonusballMax },
-                    (_, i) => i + 1,
-                  ).map((num) => {
-                    const selected = selection.bonusball === num;
-                    return (
-                      <button
-                        key={num}
-                        onClick={() => toggleBonus(num)}
-                        className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
-                          selected
-                            ? "brand-ball-gold ring-2 ring-gold-light ball-pop"
-                            : "brand-ball-empty hover:bg-white/10"
-                        }`}
-                      >
-                        {num}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <button
-                  onClick={() => setSelection({ normals: [], bonusball: 0 })}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 border border-slate-200 px-3 py-1.5 text-xs text-mut font-heading font-extrabold hover:bg-slate-200 hover:text-royal transition-colors"
-                >
-                  <span aria-hidden="true">×</span> Clear
-                </button>
-                <button
-                  onClick={handleShuffleSelection}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-royal/10 border border-royal/20 px-3 py-1.5 text-xs text-royal font-heading font-extrabold hover:bg-royal/20 transition-colors"
-                >
-                  <span aria-hidden="true">↻</span> Shuffle
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── Quick pick mode ──────────────────────────────────── */}
-
-          {mode === "quick" && (
-            <div className="quick-pick-feature">
-              <div className="relative z-10 text-center">
-                <span className="quick-pick-kicker">Feeling lucky?</span>
-                <p className="quick-pick-copy">
-                  Let the lottery choose your numbers securely onchain.
-                </p>
-              </div>
-              {!isRecurring && buyPhase !== "success" && buyPhase !== "error" && (
-                <button
-                  onClick={handleBuy}
-                  disabled={!canBuy}
-                  className={`quick-pick-buy ${
-                    buyPhase === "approving" || buyPhase === "buying" ? "animate-pulse" : ""
-                  }`}
-                >
-                  {buyPhase === "approving"
-                    ? "Approving USDC…"
-                    : buyPhase === "buying"
-                    ? "Purchasing…"
-                    : !isSalesOpen
-                    ? "Sales Closed"
-                    : allowance === undefined
-                    ? "Checking approval…"
-                    : usdcBalance !== undefined && usdcBalance < totalCost
-                    ? "Insufficient Balance"
-                    : giftState.address
-                    ? `Quick Pick for @${giftState.username || "friend"}`
-                    : "Quick Pick"}
-                </button>
-              )}
-              <p className="relative z-10 -mt-3 text-center text-[10px] text-white/60">
-                1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()}{" "}
-                for the jackpot — someone&apos;s gotta win 🍀
+          {!isRecurring && !purchaseUsesOnchainRandom && (
+            <div className="space-y-3">
+              <button
+                onClick={handleShuffleSelections}
+                className="ticket-shuffle-button w-full rounded-2xl py-4 font-heading text-lg font-extrabold"
+              >
+                <span aria-hidden="true">↻</span> Shuffle my numbers
+              </button>
+              <p className="text-center text-xs text-mut">
+                Tap any ticket to pick your own numbers.
               </p>
+              <div className="space-y-2">
+                {ticketSelections.slice(0, quantity).map((ticket, index) => (
+                  <button
+                    key={index}
+                    onClick={() => setEditingTicketIndex(index)}
+                    className="number-ticket-preview ticket-slip-button relative w-full rounded-xl px-4 py-4"
+                    aria-label={`Edit ticket ${index + 1}`}
+                  >
+                    <span className="ticket-slip-label">Ticket {index + 1}</span>
+                    <span className="flex gap-1.5 items-center justify-center flex-wrap">
+                      {ticket.normals.map((number) => (
+                        <span key={number} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball">
+                          {String(number).padStart(2, "0")}
+                        </span>
+                      ))}
+                      <span className="text-white/60 text-xs mx-0.5">+</span>
+                      <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold">
+                        {String(ticket.bonusball).padStart(2, "0")}
+                      </span>
+                    </span>
+                    <span className="ticket-slip-edit">Edit</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
-          {/* ── Brief item 8a: skeuomorphic ticket card ──────────── */}
-          {/* Shared selected/quick-pick number ticket */}
-          {(mode === "pick" && selection.normals.length > 0) || (mode === "quick") ? (
-            <div className="number-ticket-preview relative rounded-xl px-4 py-5">
-              {/* Notched edges via pseudo-elements */}
-              <span className="absolute -left-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#f7f5ef" }} />
-              <span className="absolute -right-[9px] top-1/2 -translate-y-1/2 w-[18px] h-[18px] rounded-full" style={{ background: "#f7f5ef" }} />
-
-              {/* Balls row */}
-              <div className="flex gap-1.5 items-center justify-center flex-wrap">
-                {mode === "pick" && selection.normals.length > 0 ? (
-                  <>
-                    {selection.normals.map((n) => (
-                      <span key={n} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball">
-                        {String(n).padStart(2, "0")}
-                      </span>
-                    ))}
-                    <span className="text-white/60 text-xs mx-0.5">+</span>
-                    <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold">
-                      {selection.bonusball > 0 ? String(selection.bonusball).padStart(2, "0") : "--"}
-                    </span>
-                  </>
-                ) : mode === "quick" && resolvedQuickPick ? (
-                  /* Quick-pick post-purchase: show resolved real numbers with reveal animation */
-                  <>
-                    {resolvedQuickPick.normals.map((n, idx) => (
-                      <span key={idx} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball animate-[numberReveal_0.4s_ease-out_both]" style={{ animationDelay: `${idx * 100}ms` }}>
-                        {String(n).padStart(2, "0")}
-                      </span>
-                    ))}
-                    <span className="text-white/60 text-xs mx-0.5">+</span>
-                    <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold animate-[numberReveal_0.4s_ease-out_both]" style={{ animationDelay: "500ms" }}>
-                      {String(resolvedQuickPick.bonusball).padStart(2, "0")}
-                    </span>
-                  </>
-                ) : mode === "quick" && isShuffling ? (
-                  /* Quick-pick: slot-machine shuffle animation */
-                  <>
-                    {shuffleDisplay.normals.map((n, idx) => (
-                      <span key={idx} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball tabular-nums">
-                        {String(n).padStart(2, "0")}
-                      </span>
-                    ))}
-                    <span className="text-white/60 text-xs mx-0.5">+</span>
-                    <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold tabular-nums">
-                      {String(shuffleDisplay.bonusball).padStart(2, "0")}
-                    </span>
-                  </>
-                ) : mode === "quick" && quickPickPending ? (
-                  /* Quick-pick bought but numbers not confirmed from the API yet —
-                     never show a stale ticket as yours; point the user at Results. */
-                  <span className="text-white/80 text-[11px] font-heading font-semibold">
+          {(isRecurring || purchaseUsesOnchainRandom) && (
+            <div className="quick-pick-feature onchain-random-card">
+              <div className="relative z-10 text-center space-y-2">
+                <span className="quick-pick-kicker">
+                  {isRecurring ? "Fresh numbers every drawing" : "Big play!"}
+                </span>
+                <p className="quick-pick-copy">
+                  {isRecurring
+                    ? "Every ticket is generated securely onchain."
+                    : `${quantity} tickets will be generated securely onchain.`}
+                </p>
+                {quickPickPending ? (
+                  <p className="text-white/80 text-xs font-heading font-semibold">
                     Numbers assigned — see Results below ↓
-                  </span>
+                  </p>
                 ) : (
-                  /* Quick-pick pre-purchase: show dashes */
-                  <>
-                    {[1, 2, 3, 4, 5].map((i) => (
-                      <span key={i} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-empty">
-                        --
+                  <div className="flex gap-1.5 items-center justify-center">
+                    {(resolvedQuickPick
+                      ? resolvedQuickPick.normals
+                      : isShuffling
+                        ? shuffleDisplay.normals
+                        : [0, 0, 0, 0, 0]
+                    ).map((number, index) => (
+                      <span
+                        key={index}
+                        className={`w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold tabular-nums ${
+                          number > 0 ? "brand-ball" : "brand-ball-empty"
+                        } ${resolvedQuickPick ? "animate-[numberReveal_0.4s_ease-out_both]" : ""}`}
+                        style={resolvedQuickPick ? { animationDelay: `${index * 100}ms` } : undefined}
+                      >
+                        {number > 0 ? String(number).padStart(2, "0") : "?"}
                       </span>
                     ))}
-                    <span className="text-white/60 text-xs mx-0.5">+</span>
-                    <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-empty">--</span>
-                  </>
+                    <span className="text-white/60 text-xs">+</span>
+                    <span className={`w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold tabular-nums ${
+                      (resolvedQuickPick?.bonusball ?? shuffleDisplay.bonusball) > 0
+                        ? "brand-ball-gold"
+                        : "brand-ball-empty"
+                    }`}>
+                      {resolvedQuickPick
+                        ? String(resolvedQuickPick.bonusball).padStart(2, "0")
+                        : isShuffling
+                          ? String(shuffleDisplay.bonusball).padStart(2, "0")
+                          : "?"}
+                    </span>
+                  </div>
                 )}
               </div>
-
-              {/* Brief item 8b: duplicate-numbers warning in PICK mode with qty > 1 */}
-              {mode === "pick" && (isRecurring || quantity > 1) && selection.normals.length === 5 && selection.bonusball > 0 && (
-                <p className="text-[10px] text-white/80 mt-2 text-center italic">
-                  {isRecurring
-                    ? subTicketsPerDay === 1
-                      ? `These numbers will be used for your daily ticket for ${subDuration} days`
-                      : `These numbers will be used for all ${subTicketsPerDay} daily tickets for ${subDuration} days`
-                    : `All ${quantity} tickets will carry these same numbers`}
-                </p>
-              )}
-
             </div>
-          ) : null}
+          )}
+
+          <p className="text-center text-[10px] text-mut">
+            1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()}{" "}
+            for the jackpot — someone&apos;s gotta win 🍀
+          </p>
 
           {/* ── Ticket count — morphs for recurring (brief items 1-2) ─ */}
           {/* One-time: 1 / 5 / 10 / Custom → quantity. Recurring: 1 / 2 / 3 / 5 → subTicketsPerDay. */}
@@ -1957,13 +1839,11 @@ export default function Home() {
                   !isSalesOpen ||
                   subPhase === "approving" ||
                   subPhase === "subscribing" ||
-                  (mode === "pick" && !isValidSelection) ||
                   subAllowance === undefined ||
                   (usdcBalance !== undefined && usdcBalance < subTotalCost)
                 }
                 className={`w-full py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
                   isSalesOpen &&
-                  (mode !== "pick" || isValidSelection) &&
                   subAllowance !== undefined &&
                   !(usdcBalance !== undefined && usdcBalance < subTotalCost) &&
                   subPhase !== "approving" &&
@@ -1978,8 +1858,6 @@ export default function Home() {
                   ? "Creating subscription…"
                   : !isSalesOpen
                   ? "Sales Closed"
-                  : mode === "pick" && !isValidSelection
-                  ? "Select Numbers"
                   : subAllowance === undefined
                   ? "Checking approval…"
                   : usdcBalance !== undefined && usdcBalance < subTotalCost
@@ -1987,7 +1865,7 @@ export default function Home() {
                   : `Start ${subDuration}-Day Auto-Buy · $${formatUSDC(subTotalCost)}`}
               </button>
             )
-          ) : mode === "pick" ? (
+          ) : (
             <button
               onClick={handleBuy}
               disabled={!canBuy}
@@ -1999,10 +1877,8 @@ export default function Home() {
                 ? "Approving USDC…"
                 : buyPhase === "buying"
                 ? "Purchasing…"
-                : !isSalesOpen
+              : !isSalesOpen
                 ? "Sales Closed"
-                : !isValidSelection
-                ? "Select Numbers"
                 : allowance === undefined
                 ? "Checking approval…"
                 : usdcBalance !== undefined && usdcBalance < totalCost
@@ -2011,7 +1887,7 @@ export default function Home() {
                 ? `Gift ${quantity} Ticket${quantity > 1 ? "s" : ""} to @${giftState.username || "friend"}`
               : `Buy ${quantity} Ticket${quantity > 1 ? "s" : ""}`}
             </button>
-          ) : null}
+          )}
 
 
           </div>
@@ -2602,6 +2478,90 @@ export default function Home() {
                 </p>
               </div>
             </Connected>
+          </div>
+        </div>
+      )}
+
+      {editingTicketIndex !== null && ticketSelections[editingTicketIndex] && (
+        <div
+          className="ticket-picker-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setEditingTicketIndex(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ticket-picker-title"
+            className="ticket-picker-modal"
+          >
+            <div className="flex items-center justify-between gap-4">
+              <h2 id="ticket-picker-title" className="text-xl font-heading font-extrabold text-navy">
+                Pick your numbers
+              </h2>
+              <button
+                onClick={() => setEditingTicketIndex(null)}
+                className="ticket-picker-close"
+                aria-label="Close number picker"
+              >
+                ×
+              </button>
+            </div>
+
+            <div>
+              <p className="text-mut text-sm mb-2">
+                Pick 5 numbers ({ticketSelections[editingTicketIndex].normals.length}/5)
+              </p>
+              <div className="grid grid-cols-10 gap-1.5">
+                {Array.from({ length: drawingState.ballMax }, (_, index) => index + 1).map((number) => {
+                  const selected = ticketSelections[editingTicketIndex].normals.includes(number);
+                  return (
+                    <button
+                      key={number}
+                      onClick={() => toggleBall(number)}
+                      disabled={ticketSelections[editingTicketIndex].normals.length >= 5 && !selected}
+                      className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
+                        selected
+                          ? "brand-ball ring-2 ring-coral ball-pop"
+                          : "brand-ball-empty hover:bg-white/10"
+                      } disabled:opacity-30`}
+                    >
+                      {number}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-mut text-sm mb-2">Pick 1 bonus</p>
+              <div className="grid grid-cols-10 gap-1.5">
+                {Array.from({ length: drawingState.bonusballMax }, (_, index) => index + 1).map((number) => {
+                  const selected = ticketSelections[editingTicketIndex].bonusball === number;
+                  return (
+                    <button
+                      key={number}
+                      onClick={() => toggleBonus(number)}
+                      className={`aspect-square rounded-full text-xs font-heading font-extrabold transition-all ${
+                        selected
+                          ? "brand-ball-gold ring-2 ring-gold-light ball-pop"
+                          : "brand-ball-empty hover:bg-white/10"
+                      }`}
+                    >
+                      {number}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setEditingTicketIndex(null)}
+              className="btn-gold w-full rounded-xl py-3 font-heading font-extrabold"
+            >
+              Done
+            </button>
           </div>
         </div>
       )}
