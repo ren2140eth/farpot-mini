@@ -2,7 +2,7 @@
 
 - created: 2026-07-17T00:00:00-07:00
 - modified: 2026-07-17T18:33:29-07:00
-- commits:
+- commits: f509208
 - agent: Codex
 - session:
 - back refs: `AGENTS.md` Feature 5 and buy-flow proof requirements
