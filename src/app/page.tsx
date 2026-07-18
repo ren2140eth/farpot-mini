@@ -525,6 +525,20 @@ export default function Home() {
 
   // Recent settled rounds: social proof strips and results history.
   const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
+  const recentWinTicker = useMemo(
+    () =>
+      recentRounds
+        .filter((round) => round.winners_count > 0)
+        .slice(0, 6)
+        .map((round) => ({
+          id: round.id,
+          copy:
+            round.top_prize_amount && Number(round.top_prize_amount.amount) > 0
+              ? `${round.winners_count.toLocaleString()} winners shared $${formatApiAmount(round.top_prize_amount)} in round ${round.id}`
+              : `${round.winners_count.toLocaleString()} winners scored in round ${round.id}`,
+        })),
+    [recentRounds],
+  );
 
   // Index 11 is the 5-normal + bonusball jackpot tier. Using the contract's
   // current-drawing payout avoids estimating it from historical round ratios.
@@ -1358,6 +1372,46 @@ export default function Home() {
     });
   }, [composeCast, lastClaimedAmount, lastClaimedTickets]);
 
+  // Shared onchain-random ball row: rendered inside the recurring daily
+  // ticket and the >10-ticket "big play" card. Shows ? placeholders until
+  // the real numbers resolve post-buy.
+  const quickPickBallsRow = quickPickPending ? (
+    <p className="text-white/80 text-xs font-heading font-semibold">
+      Numbers assigned — see Results below ↓
+    </p>
+  ) : (
+    <div className="flex gap-1.5 items-center justify-center">
+      {(resolvedQuickPick
+        ? resolvedQuickPick.normals
+        : isShuffling
+          ? shuffleDisplay.normals
+          : [0, 0, 0, 0, 0]
+      ).map((number, index) => (
+        <span
+          key={index}
+          className={`w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold tabular-nums ${
+            number > 0 ? "brand-ball" : "brand-ball-empty"
+          } ${resolvedQuickPick ? "animate-[numberReveal_0.4s_ease-out_both]" : ""}`}
+          style={resolvedQuickPick ? { animationDelay: `${index * 100}ms` } : undefined}
+        >
+          {number > 0 ? String(number).padStart(2, "0") : "?"}
+        </span>
+      ))}
+      <span className="text-white/60 text-xs">+</span>
+      <span className={`w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold tabular-nums ${
+        (resolvedQuickPick?.bonusball ?? shuffleDisplay.bonusball) > 0
+          ? "brand-ball-gold"
+          : "brand-ball-empty"
+      }`}>
+        {resolvedQuickPick
+          ? String(resolvedQuickPick.bonusball).padStart(2, "0")
+          : isShuffling
+            ? String(shuffleDisplay.bonusball).padStart(2, "0")
+            : "?"}
+      </span>
+    </div>
+  );
+
   // ── Render: Loading ──────────────────────────────────────────────
 
   if (loadingState || !drawingState) {
@@ -1377,6 +1431,21 @@ export default function Home() {
         <TabReader onTab={setActiveTab} />
         <GiftReader onGift={setGiftState} />
       </Suspense>
+      {recentWinTicker.length > 0 && (
+        <div className="win-ticker" aria-label="Recent Farpot wins">
+          <div className="win-ticker-track">
+            {[0, 1].map((copyIndex) => (
+              <div className="win-ticker-set" key={copyIndex} aria-hidden={copyIndex === 1}>
+                {recentWinTicker.map((win) => (
+                  <span className="win-ticker-item" key={`${copyIndex}-${win.id}`}>
+                    {win.copy}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="text-center py-3">
         <Logo scale={1.35} />
@@ -1498,137 +1567,63 @@ export default function Home() {
             Your tickets
           </h2>
 
-          {/* ── Persistent active-subscription banner (brief item 5) ──── */}
-          {/* Shows whenever a sub is active, regardless of the Repeat-daily switch. */}
-          {subInfo?.isActive && (
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5">
-              <div className="flex items-center justify-between gap-2 p-3">
-                <p className="text-emerald-400 font-heading font-bold text-sm flex items-center gap-2 min-w-0">
-                  <span>🔁</span>
-                  <span className="truncate">
-                    Auto-buy active
-                    {subInfo.dynamicTicketCount > 0 ? ` · ${subInfo.dynamicTicketCount}/day` : ""}
-                    {` · ${subInfo.daysRemaining} ${subInfo.daysRemaining === 1 ? "day" : "days"} left`}
-                  </span>
-                </p>
-                <button
-                  onClick={() => setManageOpen((o) => !o)}
-                  className="text-xs font-heading font-bold text-emerald-400/80 hover:text-emerald-400 shrink-0"
-                >
-                  {manageOpen ? "Close" : "Manage"}
-                </button>
-              </div>
-              {manageOpen && (
-                <div className="border-t border-emerald-500/20 p-3 space-y-3">
-                  <div className="grid grid-cols-2 gap-3 text-sm">
-                    <div>
-                      <p className="text-mut text-[10px] uppercase tracking-wider">Days Remaining</p>
-                      <p className="text-white font-heading font-extrabold">{subInfo.daysRemaining}</p>
-                    </div>
-                    <div>
-                      <p className="text-mut text-[10px] uppercase tracking-wider">Tickets / Day</p>
-                      <p className="text-white font-heading font-extrabold">
-                        {subInfo.dynamicTicketCount > 0 ? subInfo.dynamicTicketCount : "Custom"}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={handleCancelSubscription}
-                    disabled={subPhase === "cancelling"}
-                    className="w-full py-2.5 rounded-lg bg-win/20 border border-win/30 text-win font-heading font-bold text-sm hover:bg-win/30 disabled:opacity-50 transition-colors"
-                  >
-                    {subPhase === "cancelling" ? "Cancelling…" : "Cancel Subscription"}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
           {!isRecurring && !purchaseUsesOnchainRandom && (
             <div className="space-y-3">
               <button
                 onClick={handleShuffleSelections}
                 className="ticket-shuffle-button w-full rounded-2xl py-4 font-heading text-lg font-extrabold"
               >
-                <span aria-hidden="true">↻</span> Shuffle my numbers
+                <span aria-hidden="true">↻</span> Shuffle
               </button>
-              <p className="text-center text-xs text-mut">
-                Tap any ticket to pick your own numbers.
-              </p>
               <div className="space-y-2">
                 {ticketSelections.slice(0, quantity).map((ticket, index) => (
                   <button
                     key={index}
                     onClick={() => setEditingTicketIndex(index)}
-                    className="number-ticket-preview ticket-slip-button relative w-full rounded-xl px-4 py-4"
+                    className="number-ticket-preview ticket-slip-button relative w-full rounded-xl"
                     aria-label={`Edit ticket ${index + 1}`}
                   >
-                    <span className="ticket-slip-label">Ticket {index + 1}</span>
-                    <span className="flex gap-1.5 items-center justify-center flex-wrap">
-                      {ticket.normals.map((number) => (
-                        <span key={number} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball">
-                          {String(number).padStart(2, "0")}
+                    <span className="ticket-slip-main">
+                      <span className="ticket-slip-label">Ticket {String(index + 1).padStart(2, "0")}</span>
+                      <span className="ticket-slip-numbers flex gap-1.5 items-center justify-center flex-wrap">
+                        {ticket.normals.map((number) => (
+                          <span key={number} className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball">
+                            {String(number).padStart(2, "0")}
+                          </span>
+                        ))}
+                        <span className="text-white/60 text-xs mx-0.5">+</span>
+                        <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold">
+                          {String(ticket.bonusball).padStart(2, "0")}
                         </span>
-                      ))}
-                      <span className="text-white/60 text-xs mx-0.5">+</span>
-                      <span className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold brand-ball-gold">
-                        {String(ticket.bonusball).padStart(2, "0")}
                       </span>
                     </span>
-                    <span className="ticket-slip-edit">Edit</span>
+                    <span className="ticket-slip-stub"><span aria-hidden="true">✎</span> Edit</span>
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          {(isRecurring || purchaseUsesOnchainRandom) && (
+          {isRecurring && (
+            <div className="number-ticket-preview ticket-slip-card relative w-full rounded-xl">
+              <span className="ticket-slip-main">
+                <span className="ticket-slip-label">Daily ticket</span>
+                {quickPickBallsRow}
+                <span className="ticket-slip-note">
+                  Every ticket is generated securely onchain.
+                </span>
+              </span>
+              <span className="ticket-slip-stub"><span aria-hidden="true">🔁</span> Daily</span>
+            </div>
+          )}
+
+          {!isRecurring && purchaseUsesOnchainRandom && (
             <div className="quick-pick-feature onchain-random-card">
               <div className="relative z-10 text-center space-y-2">
-                <span className="quick-pick-kicker">
-                  {isRecurring ? "Fresh numbers every drawing" : "Big play!"}
-                </span>
                 <p className="quick-pick-copy">
-                  {isRecurring
-                    ? "Every ticket is generated securely onchain."
-                    : `${quantity} tickets will be generated securely onchain.`}
+                  {quantity} tickets will be generated securely onchain.
                 </p>
-                {quickPickPending ? (
-                  <p className="text-white/80 text-xs font-heading font-semibold">
-                    Numbers assigned — see Results below ↓
-                  </p>
-                ) : (
-                  <div className="flex gap-1.5 items-center justify-center">
-                    {(resolvedQuickPick
-                      ? resolvedQuickPick.normals
-                      : isShuffling
-                        ? shuffleDisplay.normals
-                        : [0, 0, 0, 0, 0]
-                    ).map((number, index) => (
-                      <span
-                        key={index}
-                        className={`w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold tabular-nums ${
-                          number > 0 ? "brand-ball" : "brand-ball-empty"
-                        } ${resolvedQuickPick ? "animate-[numberReveal_0.4s_ease-out_both]" : ""}`}
-                        style={resolvedQuickPick ? { animationDelay: `${index * 100}ms` } : undefined}
-                      >
-                        {number > 0 ? String(number).padStart(2, "0") : "?"}
-                      </span>
-                    ))}
-                    <span className="text-white/60 text-xs">+</span>
-                    <span className={`w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-heading font-extrabold tabular-nums ${
-                      (resolvedQuickPick?.bonusball ?? shuffleDisplay.bonusball) > 0
-                        ? "brand-ball-gold"
-                        : "brand-ball-empty"
-                    }`}>
-                      {resolvedQuickPick
-                        ? String(resolvedQuickPick.bonusball).padStart(2, "0")
-                        : isShuffling
-                          ? String(shuffleDisplay.bonusball).padStart(2, "0")
-                          : "?"}
-                    </span>
-                  </div>
-                )}
+                {quickPickBallsRow}
               </div>
             </div>
           )}
@@ -1705,7 +1700,7 @@ export default function Home() {
 
           {/* ── Summary card + Repeat-daily switch (brief items 1, 3) ─ */}
           <div className="soft-panel rounded-xl p-4 space-y-3">
-            {/* Repeat-daily switch row — disabled when a sub is active or in gift mode */}
+            {/* Active subscriptions reveal their management here; otherwise this is the setup switch. */}
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-sm text-navy font-heading font-bold flex items-center gap-1.5">
@@ -1714,28 +1709,57 @@ export default function Home() {
                 {(subInfo?.isActive || giftState.address) && (
                   <p className="text-[10px] text-mut mt-0.5">
                     {subInfo?.isActive
-                      ? "You already have an auto-buy running — manage it above."
+                      ? `Auto-buy active · ${subInfo.daysRemaining} ${subInfo.daysRemaining === 1 ? "day" : "days"} left`
                       : "Gifts are one-time."}
                   </p>
                 )}
               </div>
-              <button
-                role="switch"
-                aria-checked={isRecurring}
-                aria-label="Repeat daily"
-                disabled={!!subInfo?.isActive || !!giftState.address}
-                onClick={() => setRepeatDaily(!isRecurring)}
-                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
-                  isRecurring ? "bg-royal" : "bg-slate-300"
-                }`}
-              >
-                <span
-                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                    isRecurring ? "translate-x-5" : ""
+              {subInfo?.isActive ? (
+                <button
+                  onClick={() => setManageOpen((open) => !open)}
+                  aria-expanded={manageOpen}
+                  className="repeat-manage-button"
+                >
+                  {manageOpen ? "Close" : "Manage"} <span aria-hidden="true">›</span>
+                </button>
+              ) : (
+                <button
+                  role="switch"
+                  aria-checked={isRecurring}
+                  aria-label="Repeat daily"
+                  disabled={!!giftState.address}
+                  onClick={() => setRepeatDaily(!isRecurring)}
+                  className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                    isRecurring ? "bg-royal" : "bg-slate-300"
                   }`}
-                />
-              </button>
+                >
+                  <span
+                    className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                      isRecurring ? "translate-x-5" : ""
+                    }`}
+                  />
+                </button>
+              )}
             </div>
+
+            {subInfo?.isActive && manageOpen && (
+              <div className="repeat-manage-panel">
+                <div>
+                  <span>Tickets / day</span>
+                  <strong>{subInfo.dynamicTicketCount > 0 ? subInfo.dynamicTicketCount : "Custom"}</strong>
+                </div>
+                <div>
+                  <span>Days left</span>
+                  <strong>{subInfo.daysRemaining}</strong>
+                </div>
+                <button
+                  onClick={handleCancelSubscription}
+                  disabled={subPhase === "cancelling"}
+                >
+                  {subPhase === "cancelling" ? "Cancelling…" : "Cancel auto-buy"}
+                </button>
+              </div>
+            )}
 
             {/* Duration row — only when recurring is ON */}
             {isRecurring && (
