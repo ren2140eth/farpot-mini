@@ -40,7 +40,7 @@ export async function generateMetadata(): Promise<Metadata> {
         name,
         url: homeUrl,
         splashImageUrl: `${rootUrl}/splash-v8.png`,
-        splashBackgroundColor: "#faf8f2",
+        splashBackgroundColor: "#f3eae8",
       },
     },
   };
