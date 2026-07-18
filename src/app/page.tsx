@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "rea
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { useAccount, useConfig, useReadContract } from "wagmi";
-import { estimateGas, writeContract, waitForTransactionReceipt } from "wagmi/actions";
+import { estimateGas, readContract, writeContract, waitForTransactionReceipt } from "wagmi/actions";
 import { stringToHex, formatUnits, encodeFunctionData } from "viem";
 import { Connected } from "@coinbase/onchainkit";
 import { ConnectWallet } from "@coinbase/onchainkit/wallet";
@@ -649,13 +649,16 @@ export default function Home() {
   // Derived subscription info
   const subInfo = useMemo<SubscriptionInfo | null>(() => {
     if (!subInfoRaw) return null;
-    type RawSub = Record<string, boolean | bigint | number | unknown[]>;
-    const s = subInfoRaw as unknown as RawSub;
+    const subscription = subInfoRaw.subscription;
+    const dailyTicketCount =
+      subscription.dynamicTicketCount + BigInt(subInfoRaw.staticTickets.length);
+    const dailyCost = subscription.subscribedTicketPrice * dailyTicketCount;
     return {
-      isActive: Boolean(s.isActive ?? false),
-      daysRemaining: Number(s.daysRemaining ?? 0),
-      balance: (s.balance as bigint) ?? BigInt(0),
-      dynamicTicketCount: Number(s.dynamicTicketCount ?? 0),
+      isActive: subscription.remainingUSDC > BigInt(0),
+      daysRemaining:
+        dailyCost > BigInt(0) ? Number(subscription.remainingUSDC / dailyCost) : 0,
+      balance: subscription.remainingUSDC,
+      dynamicTicketCount: Number(subscription.dynamicTicketCount),
     };
   }, [subInfoRaw]);
 
@@ -1053,6 +1056,23 @@ export default function Home() {
     try {
       setSubError("");
 
+      // Re-read immediately before any approval. The cached hook result can be
+      // stale after an execution in another session, but the contract permits
+      // only one subscription with remaining funds per recipient.
+      const latestSubInfo = await readContract(config, {
+        address: AUTO_SUBSCRIPTION_ADDRESS,
+        abi: AUTO_SUBSCRIPTION_ABI,
+        functionName: "getSubscriptionInfo",
+        args: [address],
+      });
+      if (latestSubInfo.subscription.remainingUSDC > BigInt(0)) {
+        setIsRecurring(false);
+        setSubPhase("error");
+        setSubError("You already have an active auto-buy. Manage it above before starting another.");
+        refetchSubInfo();
+        return;
+      }
+
       // Step 1: Approve USDC spending for AutoSubscription if needed
       const needsSubApproval =
         subAllowance === undefined || subAllowance < subTotalCost;
@@ -1110,10 +1130,13 @@ export default function Home() {
       console.error("Subscription failed:", err);
       const raw = err instanceof Error ? err.message : String(err);
       const rejected = /user rejected|user denied|rejected the request/i.test(raw);
+      const alreadyActive = /ActiveSubscriptionExists/i.test(raw);
       setSubPhase("error");
       setSubError(
         rejected
           ? "Transaction cancelled."
+          : alreadyActive
+            ? "You already have an active auto-buy. Manage it above before starting another."
           : raw.includes("reverted")
             ? "Subscription creation failed on-chain — you weren't charged."
             : "Couldn't confirm the subscription. If your wallet shows it went through, otherwise tap to try again.",
