@@ -147,6 +147,15 @@ interface ApiPaginated<T> {
   has_more: boolean;
 }
 
+// Shape served by our own /api/winners/recent route.
+interface TickerWinner {
+  round_id: string;
+  wallet: string;
+  username: string | null;
+  pfp: string | null;
+  amount: ApiAmount;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function generateQuickPick(
@@ -525,20 +534,55 @@ export default function Home() {
 
   // Recent settled rounds: social proof strips and results history.
   const [recentRounds, setRecentRounds] = useState<ApiRound[]>([]);
-  const recentWinTicker = useMemo(
-    () =>
-      recentRounds
-        .filter((round) => round.winners_count > 0)
-        .slice(0, 6)
-        .map((round) => ({
-          id: round.id,
-          copy:
-            round.top_prize_amount && Number(round.top_prize_amount.amount) > 0
-              ? `${round.winners_count.toLocaleString()} winners shared $${formatApiAmount(round.top_prize_amount)} in round ${round.id}`
-              : `${round.winners_count.toLocaleString()} winners scored in round ${round.id}`,
-        })),
-    [recentRounds],
-  );
+
+  // Individual recent winners (top wins per settled round), resolved to
+  // Farcaster identities server-side where possible — /api/winners/recent.
+  const [recentWinners, setRecentWinners] = useState<TickerWinner[]>([]);
+  useEffect(() => {
+    fetch("/api/winners/recent")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { winners?: TickerWinner[] } | null) => {
+        if (data?.winners) setRecentWinners(data.winners);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Ticker interleaves each round's headline with its top winners: Farcaster
+  // winners show pfp + gold @handle, bare wallets show a shortened address.
+  const recentWinTicker = useMemo(() => {
+    const winnersByRound = new Map<string, TickerWinner[]>();
+    for (const winner of recentWinners) {
+      const list = winnersByRound.get(winner.round_id) ?? [];
+      list.push(winner);
+      winnersByRound.set(winner.round_id, list);
+    }
+    const items: { key: string; pfp: string | null; handle: string | null; copy: string }[] = [];
+    for (const round of recentRounds.filter((r) => r.winners_count > 0).slice(0, 6)) {
+      items.push({
+        key: `round-${round.id}`,
+        pfp: null,
+        handle: null,
+        copy:
+          round.top_prize_amount && Number(round.top_prize_amount.amount) > 0
+            ? `${round.winners_count.toLocaleString()} winners shared $${formatApiAmount(round.top_prize_amount)} in round ${round.id}`
+            : `${round.winners_count.toLocaleString()} winners scored in round ${round.id}`,
+      });
+      for (const winner of (winnersByRound.get(round.id) ?? []).slice(0, 3)) {
+        items.push({
+          key: `win-${round.id}-${winner.wallet}`,
+          pfp: winner.username ? winner.pfp : null,
+          handle: winner.username ? `@${winner.username}` : null,
+          // No leading space before "won" — the item is inline-flex, so a
+          // space-led text node collapses; .win-ticker-handle carries a
+          // margin-right instead.
+          copy: winner.username
+            ? `won $${formatApiAmount(winner.amount)}`
+            : `${winner.wallet.slice(0, 6)}…${winner.wallet.slice(-4)} won $${formatApiAmount(winner.amount)}`,
+        });
+      }
+    }
+    return items.slice(0, 14);
+  }, [recentRounds, recentWinners]);
 
   // Index 11 is the 5-normal + bonusball jackpot tier. Using the contract's
   // current-drawing payout avoids estimating it from historical round ratios.
@@ -1437,7 +1481,19 @@ export default function Home() {
             {[0, 1].map((copyIndex) => (
               <div className="win-ticker-set" key={copyIndex} aria-hidden={copyIndex === 1}>
                 {recentWinTicker.map((win) => (
-                  <span className="win-ticker-item" key={`${copyIndex}-${win.id}`}>
+                  <span className="win-ticker-item" key={`${copyIndex}-${win.key}`}>
+                    {win.pfp && (
+                      // eslint-disable-next-line @next/next/no-img-element -- tiny external pfps; remotePatterns config isn't worth it
+                      <img
+                        className="win-ticker-pfp"
+                        src={win.pfp}
+                        alt=""
+                        onError={(e) => {
+                          e.currentTarget.style.display = "none";
+                        }}
+                      />
+                    )}
+                    {win.handle && <b className="win-ticker-handle">{win.handle}</b>}
                     {win.copy}
                   </span>
                 ))}
