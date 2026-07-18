@@ -123,6 +123,11 @@ export const AUTO_SUBSCRIPTION_ADDRESS = "0x2694Bd48f3e6B4775943067DC842C93bf5F1
 // JackpotAutoSubscription ABI (minimal — createSubscription, cancelSubscription, getSubscriptionInfo)
 export const AUTO_SUBSCRIPTION_ABI = [
   {
+    inputs: [],
+    name: "ActiveSubscriptionExists",
+    type: "error",
+  },
+  {
     inputs: [
       { internalType: "address", name: "_recipient", type: "address" },
       { internalType: "uint64", name: "_totalDays", type: "uint64" },
@@ -158,10 +163,20 @@ export const AUTO_SUBSCRIPTION_ABI = [
     outputs: [
       {
         components: [
-          { internalType: "bool", name: "isActive", type: "bool" },
-          { internalType: "uint64", name: "daysRemaining", type: "uint64" },
-          { internalType: "uint256", name: "balance", type: "uint256" },
-          { internalType: "uint64", name: "dynamicTicketCount", type: "uint64" },
+          {
+            components: [
+              { internalType: "uint64", name: "remainingUSDC", type: "uint64" },
+              { internalType: "uint64", name: "lastExecutedDrawing", type: "uint64" },
+              { internalType: "uint64", name: "subscribedTicketPrice", type: "uint64" },
+              { internalType: "uint64", name: "dynamicTicketCount", type: "uint64" },
+              { internalType: "address[]", name: "referrers", type: "address[]" },
+              { internalType: "uint256[]", name: "referralSplit", type: "uint256[]" },
+              { internalType: "bytes32", name: "source", type: "bytes32" },
+            ],
+            internalType: "struct JackpotAutoSubscription.Subscription",
+            name: "subscription",
+            type: "tuple",
+          },
           {
             components: [
               { internalType: "uint8[]", name: "normals", type: "uint8[]" },
@@ -171,10 +186,8 @@ export const AUTO_SUBSCRIPTION_ABI = [
             name: "staticTickets",
             type: "tuple[]",
           },
-          { internalType: "address[]", name: "referrers", type: "address[]" },
-          { internalType: "uint256[]", name: "referralSplit", type: "uint256[]" },
         ],
-        internalType: "struct SubscriptionInfo",
+        internalType: "struct JackpotAutoSubscription.SubscriptionInfo",
         name: "",
         type: "tuple",
       },
