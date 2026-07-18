@@ -1382,7 +1382,7 @@ export default function Home() {
               <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
                 Today&apos;s jackpot
               </p>
-              <p className="display gold-text pulse-gold text-6xl mt-2 tabular-nums">
+              <p className="jackpot-headline display gold-text pulse-gold text-6xl mt-2 tabular-nums">
                 {headlineJackpotUsd != null ? <Odometer value={headlineJackpotUsd} /> : "…"}
               </p>
               <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-royal/25 bg-royal/10 px-3 py-1.5 text-xs font-semibold text-mut">
@@ -1566,7 +1566,7 @@ export default function Home() {
                 </span>
                 <p className="quick-pick-copy">
                   {isRecurring
-                    ? "Every ticket is generated securely onchain. No numbers to manage."
+                    ? "Every ticket is generated securely onchain."
                     : `${quantity} tickets will be generated securely onchain.`}
                 </p>
                 {quickPickPending ? (

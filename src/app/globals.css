@@ -121,6 +121,11 @@ body {
   border: 1px solid #dfe3ec;
   box-shadow: 0 16px 38px rgba(19, 36, 90, 0.08);
 }
+.jackpot-headline {
+  display: block;
+  width: 100%;
+  line-height: 1;
+}
 
 /* ── Odometer jackpot headline ────────────────────────────────────── */
 .odometer { display: inline-flex; align-items: baseline; }

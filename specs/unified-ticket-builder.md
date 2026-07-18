@@ -82,3 +82,4 @@ If a step is genuinely impossible, mark it `[f]`, note why, and move on.
 - Targeted lint has zero new errors; the remaining four errors are the pre-existing hooks baseline documented in `AGENTS.md`.
 
 ## Amendments
+- 2026-07-17T18:45:00-07:00 — Preview review found the inline-block jackpot headline sharing a line with the live ticket-count pill and awkward recurring-card copy wrapping. Made the headline a full-width block and shortened the helper copy.
