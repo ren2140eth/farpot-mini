@@ -340,6 +340,19 @@ body {
   margin-left: 20px;
   color: #f5c525;
 }
+.win-ticker-pfp {
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(112, 69, 188, .4);
+  object-fit: cover;
+}
+.win-ticker-handle {
+  margin-right: 7px;
+  color: #8a6206;
+  font-weight: 700;
+}
 @keyframes win-ticker-scroll {
   to { transform: translateX(-50%); }
 }
