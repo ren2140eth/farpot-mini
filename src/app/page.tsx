@@ -185,6 +185,13 @@ function formatUSDC(value: bigint): string {
   return formatUnits(value, USDC_DECIMALS);
 }
 
+function formatShareUSDC(value: bigint): string {
+  return Number(formatUSDC(value)).toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  });
+}
+
 // Jackpot odds for the current game: C(ballMax, 5) × bonusballMax. Computed
 // from live drawing state so the copy can never drift from the real game.
 function jackpotOdds(ballMax: number, bonusballMax: number): number {
@@ -1400,21 +1407,20 @@ export default function Home() {
 
   const handleShareWinnings = useCallback(() => {
     if (lastClaimedAmount <= BigInt(0)) return;
-    const featuredTicket = lastClaimedTickets[0];
+    const claimedRounds = new Set(lastClaimedTickets.map((ticket) => ticket.round_id));
+    const totalTickets = userTickets.filter((ticket) => claimedRounds.has(ticket.round_id)).length;
+    const shareAmount = formatShareUSDC(lastClaimedAmount);
     const params = new URLSearchParams({
-      amount: formatUSDC(lastClaimedAmount),
-      round: featuredTicket?.round_id ?? "",
-      normals: featuredTicket?.normals.join(",") ?? "",
-      bonus: featuredTicket ? String(featuredTicket.bonusball) : "",
-      bonusHit: featuredTicket?.bonusball_match ? "1" : "0",
-      tickets: String(lastClaimedTickets.length),
+      amount: shareAmount,
+      won: String(lastClaimedTickets.length),
+      tickets: String(Math.max(lastClaimedTickets.length, totalTickets)),
     });
     const cardUrl = `${APP_URL}/api/share/win-card?${params.toString()}`;
     composeCast({
-      text: `I just won $${formatUSDC(lastClaimedAmount)} USDC on Farpot 🎉 Feeling lucky?`,
+      text: `I just won $${shareAmount} USDC on Farpot 🎉`,
       embeds: [cardUrl, APP_URL],
     });
-  }, [composeCast, lastClaimedAmount, lastClaimedTickets]);
+  }, [composeCast, lastClaimedAmount, lastClaimedTickets, userTickets]);
 
   // Shared onchain-random ball row: rendered inside the recurring daily
   // ticket and the >10-ticket "big play" card. Shows ? placeholders until

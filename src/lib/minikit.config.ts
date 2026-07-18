@@ -28,7 +28,7 @@ export const minikitConfig = {
     screenshotUrls: [`${ROOT_URL}/screenshot-v4.png`],
     iconUrl: `${ROOT_URL}/icon-v10.png`,
     splashImageUrl: `${ROOT_URL}/splash-v8.png`,
-    splashBackgroundColor: "#faf8f2",
+    splashBackgroundColor: "#f3eae8",
     homeUrl: ROOT_URL,
     primaryCategory: "finance",
     tags: ["farpot", "gift", "lottery", "megapot", "base"],
