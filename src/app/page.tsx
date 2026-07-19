@@ -1414,10 +1414,13 @@ export default function Home() {
       amount: shareAmount,
       won: String(lastClaimedTickets.length),
       tickets: String(Math.max(lastClaimedTickets.length, totalTickets)),
+      // Busts the wrpcd.net CDN cache (immutable, 1y) so old casts' cached
+      // renders don't shadow the redesigned card. Bump when the design changes.
+      v: "2",
     });
     const cardUrl = `${APP_URL}/api/share/win-card?${params.toString()}`;
     composeCast({
-      text: `I just won $${shareAmount} USDC on Farpot 🎉`,
+      text: `I just won $${shareAmount} on Farpot 🎉`,
       embeds: [cardUrl, APP_URL],
     });
   }, [composeCast, lastClaimedAmount, lastClaimedTickets, userTickets]);
