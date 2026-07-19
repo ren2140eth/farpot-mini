@@ -200,6 +200,33 @@ function jackpotOdds(ballMax: number, bonusballMax: number): number {
   return Math.round(combos) * bonusballMax;
 }
 
+function choose(n: number, k: number): number {
+  let c = 1;
+  for (let i = 0; i < k; i++) c = (c * (n - i)) / (i + 1);
+  return Math.round(c);
+}
+
+// Odds that one ticket wins ANY paying tier. Tier index = matches × 2 +
+// (bonusball ? 1 : 0), so which (matches, bonusball) combos pay comes from the
+// live getDrawingTierPayouts read — verified against drawing #118, where every
+// tier pays except 0–1 matches without the bonusball (≈ 1 in 4 overall).
+// Ceiled so the copy never overstates the player's chance.
+function anyPrizeOdds(
+  ballMax: number,
+  bonusballMax: number,
+  tierPayouts: readonly bigint[] | undefined,
+): number | null {
+  if (!tierPayouts || tierPayouts.length < 12 || ballMax < 6 || bonusballMax < 1) return null;
+  const totalCombos = choose(ballMax, 5);
+  let pWin = 0;
+  for (let matches = 0; matches <= 5; matches++) {
+    const pMatches = (choose(5, matches) * choose(ballMax - 5, 5 - matches)) / totalCombos;
+    if (tierPayouts[matches * 2] > BigInt(0)) pWin += (pMatches * (bonusballMax - 1)) / bonusballMax;
+    if (tierPayouts[matches * 2 + 1] > BigInt(0)) pWin += pMatches / bonusballMax;
+  }
+  return pWin > 0 ? Math.ceil(1 / pWin) : null;
+}
+
 function formatApiAmount(amount: ApiAmount | null | undefined): string {
   if (!amount) return "0";
   return (Number(amount.amount) / 10 ** amount.decimals).toFixed(2);
@@ -1693,9 +1720,20 @@ export default function Home() {
             </div>
           )}
 
+          {/* One template literal: the JSX transform swallows line-leading
+              spaces after {expr}, so never split this copy across lines. */}
           <p className="text-center text-[10px] text-mut">
-            1 in {jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()}{" "}
-            for the jackpot — someone&apos;s gotta win 🍀
+            {(() => {
+              const prizeOdds = anyPrizeOdds(
+                drawingState.ballMax,
+                drawingState.bonusballMax,
+                tierPayouts,
+              );
+              const jackpot = `1 in ${jackpotOdds(drawingState.ballMax, drawingState.bonusballMax).toLocaleString()} for the jackpot`;
+              return prizeOdds
+                ? `1 in ${prizeOdds} tickets wins a prize · ${jackpot} — someone's gotta win 🍀`
+                : `${jackpot} — someone's gotta win 🍀`;
+            })()}
           </p>
 
           {/* ── Ticket count — morphs for recurring (brief items 1-2) ─ */}
