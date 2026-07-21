@@ -87,7 +87,7 @@ const haptics = {
 
 // ── Subscription types ───────────────────────────────────────────────
 
-type SubPhase = "idle" | "approving" | "subscribing" | "success" | "error" | "cancelling";
+type SubPhase = "idle" | "approving" | "subscribing" | "success" | "cancelled" | "error" | "cancelling";
 
 interface SubscriptionInfo {
   isActive: boolean;
@@ -760,6 +760,12 @@ export default function Home() {
     return drawingState.ticketPrice * BigInt(subTicketsPerDay) * BigInt(subDuration);
   }, [drawingState, subTicketsPerDay, subDuration]);
 
+  // True whenever the "start a new subscription" config form (tickets/day,
+  // duration, cost breakdown, CTA) has nothing useful to offer: either a
+  // subscription is already active, or its cancellation confirmation is still
+  // on screen (subInfo hasn't refetched to isActive:false yet).
+  const subConfigBlocked = isRecurring && (!!subInfo?.isActive || subPhase === "cancelled");
+
   // ── Mode / allowance (play + gift tab) ────────────────────────────
   const totalCost = useMemo(() => {
     if (!drawingState) return BigInt(0);
@@ -1256,7 +1262,8 @@ export default function Home() {
         throw new Error("Cancel reverted");
       }
 
-      setSubPhase("success");
+      setSubPhase("cancelled");
+      setManageOpen(false);
       refetchUsdcBalance();
       refetchSubInfo();
     } catch (err: unknown) {
@@ -1737,7 +1744,11 @@ export default function Home() {
           </p>
 
           {/* ── Ticket count — morphs for recurring (brief items 1-2) ─ */}
-          {/* One-time: 1 / 5 / 10 / Custom → quantity. Recurring: 1 / 2 / 3 / 5 → subTicketsPerDay. */}
+          {/* One-time: 1 / 5 / 10 / Custom → quantity. Recurring: 1 / 2 / 3 / 5 → subTicketsPerDay.
+              Hidden entirely while an auto-buy is already active — there's no
+              "update subscription" action, so this would just be a config
+              form for a new subscription the app already refuses to start. */}
+          {!subConfigBlocked && (
           <div className="space-y-2">
             <span className="text-mut text-xs uppercase tracking-widest font-heading font-bold">
               {isRecurring ? "Tickets / day" : "Tickets"}
@@ -1800,6 +1811,7 @@ export default function Home() {
               </>
             )}
           </div>
+          )}
 
           {/* ── Summary card + Repeat-daily switch (brief items 1, 3) ─ */}
           <div className="soft-panel rounded-xl p-4 space-y-3">
@@ -1810,39 +1822,43 @@ export default function Home() {
                   <span>🔁</span> Repeat daily
                 </p>
                 {(subInfo?.isActive || giftState.address) && (
-                  <p className="text-[10px] text-mut mt-0.5">
-                    {subInfo?.isActive
-                      ? `Auto-buy active · ${subInfo.daysRemaining} ${subInfo.daysRemaining === 1 ? "day" : "days"} left`
-                      : "Gifts are one-time."}
+                  <p className="text-[10px] text-mut mt-0.5 flex items-center flex-wrap gap-x-1.5 gap-y-0.5">
+                    <span>
+                      {subInfo?.isActive
+                        ? `Auto-buy active · ${subInfo.daysRemaining} ${subInfo.daysRemaining === 1 ? "day" : "days"} left`
+                        : "Gifts are one-time."}
+                    </span>
+                    {subInfo?.isActive && (
+                      <button
+                        onClick={() => setManageOpen((open) => !open)}
+                        aria-expanded={manageOpen}
+                        className="repeat-manage-link"
+                      >
+                        {manageOpen ? "Close" : "Manage"} <span aria-hidden="true">›</span>
+                      </button>
+                    )}
                   </p>
                 )}
               </div>
-              {subInfo?.isActive ? (
-                <button
-                  onClick={() => setManageOpen((open) => !open)}
-                  aria-expanded={manageOpen}
-                  className="repeat-manage-button"
-                >
-                  {manageOpen ? "Close" : "Manage"} <span aria-hidden="true">›</span>
-                </button>
-              ) : (
-                <button
-                  role="switch"
-                  aria-checked={isRecurring}
-                  aria-label="Repeat daily"
-                  disabled={!!giftState.address}
-                  onClick={() => setRepeatDaily(!isRecurring)}
-                  className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
-                    isRecurring ? "bg-royal" : "bg-slate-300"
+              {/* Switch stays visible even with an active subscription — it only
+                  toggles which picker view renders, so turning it off is how you
+                  get back to the one-time ticket UI without cancelling the sub. */}
+              <button
+                role="switch"
+                aria-checked={isRecurring}
+                aria-label="Repeat daily"
+                disabled={!!giftState.address}
+                onClick={() => setRepeatDaily(!isRecurring)}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  isRecurring ? "bg-royal" : "bg-slate-300"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                    isRecurring ? "translate-x-5" : ""
                   }`}
-                >
-                  <span
-                    className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                      isRecurring ? "translate-x-5" : ""
-                    }`}
-                  />
-                </button>
-              )}
+                />
+              </button>
             </div>
 
             {subInfo?.isActive && manageOpen && (
@@ -1864,8 +1880,8 @@ export default function Home() {
               </div>
             )}
 
-            {/* Duration row — only when recurring is ON */}
-            {isRecurring && (
+            {/* Duration row — only when configuring a new subscription */}
+            {isRecurring && !subConfigBlocked && (
               <div className="flex items-center justify-between border-t border-white/10 pt-3">
                 <span className="text-sm text-mut">Duration</span>
                 <div className="flex gap-1.5">
@@ -1886,7 +1902,10 @@ export default function Home() {
               </div>
             )}
 
-            {/* Cost breakdown — morphs with the switch */}
+            {/* Cost breakdown — morphs with the switch. Hidden entirely while
+                already subscribed: it's priced for a new subscription that
+                can't be started (Manage above covers the active one). */}
+            {!subConfigBlocked && (
             <div className="space-y-1 text-sm border-t border-white/10 pt-3">
               {isRecurring ? (
                 <>
@@ -1914,6 +1933,7 @@ export default function Home() {
                 </div>
               )}
             </div>
+            )}
           </div>
 
           {/* ── Status messages (single block for both flows) ─────── */}
@@ -1922,6 +1942,19 @@ export default function Home() {
               <p className="text-emerald-400 font-medium">🎰 Auto-buy started!</p>
               <p className="text-xs text-mut">
                 {subDuration}-day auto-buy active. Check back to see your tickets each drawing.
+              </p>
+              <button
+                onClick={handleResetSub}
+                className="text-sm text-emerald-400/70 hover:text-emerald-400"
+              >
+                Done
+              </button>
+            </div>
+          ) : subPhase === "cancelled" ? (
+            <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-center space-y-3">
+              <p className="text-emerald-400 font-medium">Auto-buy cancelled</p>
+              <p className="text-xs text-mut">
+                Your remaining balance has been refunded. No more daily tickets will be bought.
               </p>
               <button
                 onClick={handleResetSub}
@@ -1978,9 +2011,11 @@ export default function Home() {
             </div>
           ) : null}
 
-          {/* ── Single CTA — morphs between one-time buy and auto-buy ── */}
+          {/* ── Single CTA — morphs between one-time buy and auto-buy.
+              Hidden while subConfigBlocked — there's no "start" action to
+              offer; Manage above is the CTA. ── */}
           {isRecurring ? (
-            subPhase !== "success" && subPhase !== "error" && (
+            !subConfigBlocked && subPhase !== "success" && subPhase !== "error" && (
               <button
                 onClick={handleCreateSubscription}
                 disabled={
