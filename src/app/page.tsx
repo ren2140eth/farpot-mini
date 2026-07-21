@@ -1810,39 +1810,43 @@ export default function Home() {
                   <span>🔁</span> Repeat daily
                 </p>
                 {(subInfo?.isActive || giftState.address) && (
-                  <p className="text-[10px] text-mut mt-0.5">
-                    {subInfo?.isActive
-                      ? `Auto-buy active · ${subInfo.daysRemaining} ${subInfo.daysRemaining === 1 ? "day" : "days"} left`
-                      : "Gifts are one-time."}
+                  <p className="text-[10px] text-mut mt-0.5 flex items-center flex-wrap gap-x-1.5 gap-y-0.5">
+                    <span>
+                      {subInfo?.isActive
+                        ? `Auto-buy active · ${subInfo.daysRemaining} ${subInfo.daysRemaining === 1 ? "day" : "days"} left`
+                        : "Gifts are one-time."}
+                    </span>
+                    {subInfo?.isActive && (
+                      <button
+                        onClick={() => setManageOpen((open) => !open)}
+                        aria-expanded={manageOpen}
+                        className="repeat-manage-link"
+                      >
+                        {manageOpen ? "Close" : "Manage"} <span aria-hidden="true">›</span>
+                      </button>
+                    )}
                   </p>
                 )}
               </div>
-              {subInfo?.isActive ? (
-                <button
-                  onClick={() => setManageOpen((open) => !open)}
-                  aria-expanded={manageOpen}
-                  className="repeat-manage-button"
-                >
-                  {manageOpen ? "Close" : "Manage"} <span aria-hidden="true">›</span>
-                </button>
-              ) : (
-                <button
-                  role="switch"
-                  aria-checked={isRecurring}
-                  aria-label="Repeat daily"
-                  disabled={!!giftState.address}
-                  onClick={() => setRepeatDaily(!isRecurring)}
-                  className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
-                    isRecurring ? "bg-royal" : "bg-slate-300"
+              {/* Switch stays visible even with an active subscription — it only
+                  toggles which picker view renders, so turning it off is how you
+                  get back to the one-time ticket UI without cancelling the sub. */}
+              <button
+                role="switch"
+                aria-checked={isRecurring}
+                aria-label="Repeat daily"
+                disabled={!!giftState.address}
+                onClick={() => setRepeatDaily(!isRecurring)}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  isRecurring ? "bg-royal" : "bg-slate-300"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                    isRecurring ? "translate-x-5" : ""
                   }`}
-                >
-                  <span
-                    className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                      isRecurring ? "translate-x-5" : ""
-                    }`}
-                  />
-                </button>
-              )}
+                />
+              </button>
             </div>
 
             {subInfo?.isActive && manageOpen && (

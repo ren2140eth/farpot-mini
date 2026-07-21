@@ -262,16 +262,17 @@ body {
   text-transform: uppercase;
 }
 .ticket-slip-stub > [aria-hidden] { font-size: 15px; line-height: 1; }
-.repeat-manage-button {
+.repeat-manage-link {
   flex: none;
-  padding: 7px 10px;
+  padding: 2px 8px;
   border: 1px solid rgba(54, 167, 122, .35);
   border-radius: 999px;
   background: rgba(54, 167, 122, .09);
   color: #287c5b;
   font-family: var(--font-heading), sans-serif;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 900;
+  line-height: 1.4;
 }
 .repeat-manage-panel {
   display: grid;
