@@ -50,7 +50,7 @@ interface TicketSelection {
 
 type BuyPhase = "idle" | "approving" | "buying" | "success" | "error";
 type TabKey = "play" | "gift" | "results";
-type QtyPreset = "1" | "5" | "10" | "custom";
+type QtyPreset = "1" | "2" | "5" | "10" | "custom";
 
 function ConfettiBurst() {
   return (
@@ -1772,7 +1772,7 @@ export default function Home() {
             ) : (
               <>
                 <div className="flex gap-2">
-                  {(["1", "5", "10", "custom"] as QtyPreset[]).map((p) => (
+                  {(["1", "2", "5", "10", "custom"] as QtyPreset[]).map((p) => (
                     <button
                       key={p}
                       onClick={() => {
@@ -2230,7 +2230,7 @@ export default function Home() {
           <div className="space-y-2">
             <span className="text-mut text-xs uppercase tracking-widest font-heading font-bold">Tickets</span>
             <div className="flex gap-2">
-              {(["1", "5", "10", "custom"] as QtyPreset[]).map((p) => (
+              {(["1", "2", "5", "10", "custom"] as QtyPreset[]).map((p) => (
                 <button
                   key={p}
                   onClick={() => {
