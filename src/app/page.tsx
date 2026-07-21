@@ -1737,7 +1737,11 @@ export default function Home() {
           </p>
 
           {/* ── Ticket count — morphs for recurring (brief items 1-2) ─ */}
-          {/* One-time: 1 / 5 / 10 / Custom → quantity. Recurring: 1 / 2 / 3 / 5 → subTicketsPerDay. */}
+          {/* One-time: 1 / 5 / 10 / Custom → quantity. Recurring: 1 / 2 / 3 / 5 → subTicketsPerDay.
+              Hidden entirely while an auto-buy is already active — there's no
+              "update subscription" action, so this would just be a config
+              form for a new subscription the app already refuses to start. */}
+          {!(isRecurring && subInfo?.isActive) && (
           <div className="space-y-2">
             <span className="text-mut text-xs uppercase tracking-widest font-heading font-bold">
               {isRecurring ? "Tickets / day" : "Tickets"}
@@ -1800,6 +1804,7 @@ export default function Home() {
               </>
             )}
           </div>
+          )}
 
           {/* ── Summary card + Repeat-daily switch (brief items 1, 3) ─ */}
           <div className="soft-panel rounded-xl p-4 space-y-3">
@@ -1868,8 +1873,8 @@ export default function Home() {
               </div>
             )}
 
-            {/* Duration row — only when recurring is ON */}
-            {isRecurring && (
+            {/* Duration row — only when configuring a new subscription */}
+            {isRecurring && !subInfo?.isActive && (
               <div className="flex items-center justify-between border-t border-white/10 pt-3">
                 <span className="text-sm text-mut">Duration</span>
                 <div className="flex gap-1.5">
@@ -1890,7 +1895,10 @@ export default function Home() {
               </div>
             )}
 
-            {/* Cost breakdown — morphs with the switch */}
+            {/* Cost breakdown — morphs with the switch. Hidden entirely while
+                already subscribed: it's priced for a new subscription that
+                can't be started (Manage above covers the active one). */}
+            {!(isRecurring && subInfo?.isActive) && (
             <div className="space-y-1 text-sm border-t border-white/10 pt-3">
               {isRecurring ? (
                 <>
@@ -1918,6 +1926,7 @@ export default function Home() {
                 </div>
               )}
             </div>
+            )}
           </div>
 
           {/* ── Status messages (single block for both flows) ─────── */}
@@ -1982,9 +1991,11 @@ export default function Home() {
             </div>
           ) : null}
 
-          {/* ── Single CTA — morphs between one-time buy and auto-buy ── */}
+          {/* ── Single CTA — morphs between one-time buy and auto-buy.
+              Hidden while already subscribed (isRecurring && subInfo.isActive)
+              — there's no "start" action to offer; Manage above is the CTA. ── */}
           {isRecurring ? (
-            subPhase !== "success" && subPhase !== "error" && (
+            !subInfo?.isActive && subPhase !== "success" && subPhase !== "error" && (
               <button
                 onClick={handleCreateSubscription}
                 disabled={
