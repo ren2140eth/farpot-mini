@@ -87,7 +87,7 @@ const haptics = {
 
 // ── Subscription types ───────────────────────────────────────────────
 
-type SubPhase = "idle" | "approving" | "subscribing" | "success" | "error" | "cancelling";
+type SubPhase = "idle" | "approving" | "subscribing" | "success" | "cancelled" | "error" | "cancelling";
 
 interface SubscriptionInfo {
   isActive: boolean;
@@ -760,6 +760,12 @@ export default function Home() {
     return drawingState.ticketPrice * BigInt(subTicketsPerDay) * BigInt(subDuration);
   }, [drawingState, subTicketsPerDay, subDuration]);
 
+  // True whenever the "start a new subscription" config form (tickets/day,
+  // duration, cost breakdown, CTA) has nothing useful to offer: either a
+  // subscription is already active, or its cancellation confirmation is still
+  // on screen (subInfo hasn't refetched to isActive:false yet).
+  const subConfigBlocked = isRecurring && (!!subInfo?.isActive || subPhase === "cancelled");
+
   // ── Mode / allowance (play + gift tab) ────────────────────────────
   const totalCost = useMemo(() => {
     if (!drawingState) return BigInt(0);
@@ -1256,7 +1262,8 @@ export default function Home() {
         throw new Error("Cancel reverted");
       }
 
-      setSubPhase("success");
+      setSubPhase("cancelled");
+      setManageOpen(false);
       refetchUsdcBalance();
       refetchSubInfo();
     } catch (err: unknown) {
@@ -1741,7 +1748,7 @@ export default function Home() {
               Hidden entirely while an auto-buy is already active — there's no
               "update subscription" action, so this would just be a config
               form for a new subscription the app already refuses to start. */}
-          {!(isRecurring && subInfo?.isActive) && (
+          {!subConfigBlocked && (
           <div className="space-y-2">
             <span className="text-mut text-xs uppercase tracking-widest font-heading font-bold">
               {isRecurring ? "Tickets / day" : "Tickets"}
@@ -1874,7 +1881,7 @@ export default function Home() {
             )}
 
             {/* Duration row — only when configuring a new subscription */}
-            {isRecurring && !subInfo?.isActive && (
+            {isRecurring && !subConfigBlocked && (
               <div className="flex items-center justify-between border-t border-white/10 pt-3">
                 <span className="text-sm text-mut">Duration</span>
                 <div className="flex gap-1.5">
@@ -1898,7 +1905,7 @@ export default function Home() {
             {/* Cost breakdown — morphs with the switch. Hidden entirely while
                 already subscribed: it's priced for a new subscription that
                 can't be started (Manage above covers the active one). */}
-            {!(isRecurring && subInfo?.isActive) && (
+            {!subConfigBlocked && (
             <div className="space-y-1 text-sm border-t border-white/10 pt-3">
               {isRecurring ? (
                 <>
@@ -1935,6 +1942,19 @@ export default function Home() {
               <p className="text-emerald-400 font-medium">🎰 Auto-buy started!</p>
               <p className="text-xs text-mut">
                 {subDuration}-day auto-buy active. Check back to see your tickets each drawing.
+              </p>
+              <button
+                onClick={handleResetSub}
+                className="text-sm text-emerald-400/70 hover:text-emerald-400"
+              >
+                Done
+              </button>
+            </div>
+          ) : subPhase === "cancelled" ? (
+            <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-center space-y-3">
+              <p className="text-emerald-400 font-medium">Auto-buy cancelled</p>
+              <p className="text-xs text-mut">
+                Your remaining balance has been refunded. No more daily tickets will be bought.
               </p>
               <button
                 onClick={handleResetSub}
@@ -1992,10 +2012,10 @@ export default function Home() {
           ) : null}
 
           {/* ── Single CTA — morphs between one-time buy and auto-buy.
-              Hidden while already subscribed (isRecurring && subInfo.isActive)
-              — there's no "start" action to offer; Manage above is the CTA. ── */}
+              Hidden while subConfigBlocked — there's no "start" action to
+              offer; Manage above is the CTA. ── */}
           {isRecurring ? (
-            !subInfo?.isActive && subPhase !== "success" && subPhase !== "error" && (
+            !subConfigBlocked && subPhase !== "success" && subPhase !== "error" && (
               <button
                 onClick={handleCreateSubscription}
                 disabled={
