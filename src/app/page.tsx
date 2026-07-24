@@ -1,12 +1,19 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  Suspense,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
-import { useAccount, useConfig, useReadContract } from "wagmi";
+import { useAccount, useConfig, useDisconnect, useReadContract } from "wagmi";
 import { estimateGas, readContract, writeContract, waitForTransactionReceipt } from "wagmi/actions";
 import { stringToHex, formatUnits, encodeFunctionData } from "viem";
-import { Connected } from "@coinbase/onchainkit";
 import { ConnectWallet } from "@coinbase/onchainkit/wallet";
 import { useMiniKit, useComposeCast } from "@coinbase/onchainkit/minikit";
 import { sdk } from "@farcaster/miniapp-sdk";
@@ -84,6 +91,43 @@ const haptics = {
   success: () => tryHaptic(() => sdk.haptics.notificationOccurred("success")),
   error: () => tryHaptic(() => sdk.haptics.notificationOccurred("error")),
 };
+
+// ── Theme: light / midnight ─────────────────────────────────────────
+// data-theme on <html> is applied PRE-PAINT by the inline script in
+// layout.tsx — that script is the source of truth on first render, not this
+// module. React reads it through useSyncExternalStore rather than an effect,
+// so the server can render "light" and the client can correct to whatever the
+// script already applied without a hydration mismatch.
+type Theme = "light" | "midnight";
+const THEME_KEY = "farpot-theme";
+const themeListeners = new Set<() => void>();
+
+function subscribeTheme(onChange: () => void) {
+  themeListeners.add(onChange);
+  return () => {
+    themeListeners.delete(onChange);
+  };
+}
+
+function readTheme(): Theme {
+  return document.documentElement.dataset.theme === "midnight" ? "midnight" : "light";
+}
+
+function useTheme(): [Theme, () => void] {
+  const theme = useSyncExternalStore(subscribeTheme, readTheme, () => "light" as Theme);
+  const toggle = useCallback(() => {
+    haptics.select();
+    const next: Theme = theme === "midnight" ? "light" : "midnight";
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      /* storage unavailable — the choice just won't survive a reload */
+    }
+    themeListeners.forEach((listener) => listener());
+  }, [theme]);
+  return [theme, toggle];
+}
 
 // ── Subscription types ───────────────────────────────────────────────
 
@@ -185,6 +229,10 @@ function formatUSDC(value: bigint): string {
   return formatUnits(value, USDC_DECIMALS);
 }
 
+function shortenAddress(value: string): string {
+  return `${value.slice(0, 6)}…${value.slice(-4)}`;
+}
+
 function formatShareUSDC(value: bigint): string {
   return Number(formatUSDC(value)).toLocaleString("en-US", {
     minimumFractionDigits: 0,
@@ -257,6 +305,12 @@ function formatDateTime(iso: string | null): string {
 // A newly settled ticket reveals its matches one ball at a time, once. Seen
 // ticket ids are remembered locally so the drama never replays.
 const SWEAT_SEEN_KEY = "farpot-sweated-tickets";
+
+// Wait before each reveal, indexed by the step we are leaving: [0] is the beat
+// before the first normal ball, [1]–[4] the remaining normals, [5] the long
+// hold before the bonusball (the tensest moment), [6] the pause before the
+// verdict copy. ~7s in total — deliberately unhurried; this is the sweat.
+const SWEAT_STEP_MS = [1000, 900, 900, 900, 900, 1400, 900];
 
 function getSweatedIds(): Set<string> {
   try {
@@ -385,16 +439,24 @@ function Odometer({ value }: { value: number }) {
 }
 
 // ── Shared FAR ★ POT lockup from the approved brand mockup ─────────
-function Logo({ scale = 1 }: { scale?: number }) {
+function Logo({ scale = 1, theme = "light" }: { scale?: number; theme?: Theme }) {
+  // wordmark-v1 is NOT used here: it has its cream ground baked in (no alpha)
+  // and would be a pale slab on midnight. Both variants below are 879×165, so
+  // switching themes cannot move the header by a pixel.
+  //
+  // The midnight variant lifts POT's purple #845fc9 → #a585e8. Measured on the
+  // night ground the shipping purple is 3.32:1 against coral's 5.05:1, so POT
+  // read muddy next to FAR; lifted it sits at 5.29:1 and the three elements
+  // finally carry equal weight.
   return (
     <Image
-      src="/wordmark-v1.png"
+      src={theme === "midnight" ? "/wordmark-midnight.png" : "/wordmark-transparent.png"}
       alt="Farpot"
-      width={942}
-      height={252}
+      width={879}
+      height={165}
       priority
       className="mx-auto h-auto"
-      style={{ width: `${210 * scale}px` }}
+      style={{ width: `${196 * scale}px` }}
     />
   );
 }
@@ -404,7 +466,9 @@ function Logo({ scale = 1 }: { scale?: number }) {
 function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey; onTabChange: (tab: TabKey) => void; hasClaimable?: boolean }) {
   return (
     <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-50" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      <nav className="flex items-center gap-1 px-3 py-2 rounded-full bg-white/95 backdrop-blur-md border border-slate-200 shadow-lg shadow-slate-300/40">
+      {/* Surface styling lives in .nav-pill, not utilities, so the theme can
+          own it — a bg-white/95 utility here beats any [data-theme] rule. */}
+      <nav className="nav-pill flex items-center gap-1 px-3 py-2 rounded-full backdrop-blur-md">
         {[
           {
             key: 'play' as TabKey,
@@ -469,6 +533,12 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
 export default function Home() {
   const config = useConfig();
   const { address, isConnected } = useAccount();
+  const { disconnect } = useDisconnect();
+  const [theme, toggleTheme] = useTheme();
+
+  // ── Wallet sheet (chip in the header opens it) ────────────────
+  const [walletSheetOpen, setWalletSheetOpen] = useState(false);
+  const [addressCopied, setAddressCopied] = useState(false);
 
   // ── Dismiss the Farcaster splash screen ───────────────
   const { setMiniAppReady, isMiniAppReady } = useMiniKit();
@@ -1384,7 +1454,7 @@ export default function Home() {
     if (sweatTicketIds.size === 0 || sweatStep >= 7) return;
     const t = setTimeout(
       () => setSweatStep((s) => s + 1),
-      sweatStep === 0 ? 750 : 620,
+      SWEAT_STEP_MS[sweatStep] ?? 900,
     );
     return () => clearTimeout(t);
   }, [sweatTicketIds, sweatStep]);
@@ -1545,9 +1615,54 @@ export default function Home() {
           </div>
         </div>
       )}
-      {/* Header */}
-      <div className="text-center py-3">
-        <Logo scale={1.35} />
+      {/* Header — controls sit in their own row under the ticker, the wordmark
+          below them. Both are in normal flow (not absolute) so the chips can
+          never crowd the logo and the spacing is the same on every tab. */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="header-chip"
+            aria-label={theme === "midnight" ? "Switch to light mode" : "Switch to midnight mode"}
+          >
+            {theme === "midnight" ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="4.2" />
+                <path d="M12 2.6v2.2M12 19.2v2.2M4.3 4.3l1.6 1.6M18.1 18.1l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.3 19.7l1.6-1.6M18.1 5.9l1.6-1.6" />
+              </svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z" />
+              </svg>
+            )}
+          </button>
+          {/* Always present, connected or not — the wallet is a fixed landmark
+              rather than something that appears once you're already in. */}
+          <button
+            type="button"
+            onClick={() => {
+              haptics.select();
+              setWalletSheetOpen(true);
+            }}
+            className="header-chip"
+            aria-label={
+              isConnected && address
+                ? `Wallet ${shortenAddress(address)} — connected`
+                : "Wallet — not connected"
+            }
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H18a1 1 0 0 1 1 1v2" />
+              <path d="M3 7.5v9A2.5 2.5 0 0 0 5.5 19H19a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1H5.5A2.5 2.5 0 0 1 3 7.5Z" />
+              <circle cx="16" cy="13.5" r="1.15" fill="currentColor" stroke="none" />
+            </svg>
+            <span className={`wallet-chip-dot ${isConnected ? "" : "wallet-chip-dot-off"}`} />
+          </button>
+        </div>
+        <div className="text-center pb-1">
+          <Logo scale={1.35} theme={theme} />
+        </div>
       </div>
 
       {/* ── PLAY TAB ─────────────────────────────────────────────── */}
@@ -1569,7 +1684,14 @@ export default function Home() {
 
           {/* Jackpot info card — clean flagship surface with lottery accents.
               Final hour before the draw flips it into golden-hour night mode. */}
-          <div className={`jackpot-card rounded-3xl p-6 space-y-5 ${isGoldenHour ? "jackpot-golden" : ""}`}>
+          {/* Golden hour's trick was flipping the card to night — that is the
+              theme's job now, so in light mode the final hour keeps only the
+              countdown cue and the card stays light. */}
+          <div
+            className={`jackpot-card rounded-3xl p-6 space-y-5 ${
+              isGoldenHour ? (theme === "midnight" ? "jackpot-golden" : "jackpot-final-hour") : ""
+            }`}
+          >
             <div className="text-center">
               <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
                 Today&apos;s jackpot
@@ -2123,21 +2245,6 @@ export default function Home() {
             {/* TODO: insert agent's Farcaster @handle here once live */}
           </p>
 
-          {isConnected && (
-          <div className="flex justify-center">
-            <Connected>
-              <div className="flex flex-col items-center gap-1 text-sm text-mut">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Connected
-                </div>
-                <p className="text-[10px] uppercase tracking-[0.25em] text-mut/70">
-                  Powered by Megapot
-                </p>
-              </div>
-            </Connected>
-          </div>
-          )}
         </>
       )}
 
@@ -2356,20 +2463,6 @@ export default function Home() {
               : `Gift ${quantity} Ticket${quantity > 1 ? "s" : ""} to @${giftState.username || "friend"}`}
           </button>
 
-          {/* Wallet button */}
-          <div className="flex justify-center">
-            <Connected>
-              <div className="flex flex-col items-center gap-1 text-sm text-mut">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Connected
-                </div>
-                <p className="text-[10px] uppercase tracking-[0.25em] text-mut/70">
-                  Powered by Megapot
-                </p>
-              </div>
-            </Connected>
-          </div>
         </>
       )}
 
@@ -2645,20 +2738,6 @@ export default function Home() {
             )}
           </div>
 
-          {/* Wallet connect */}
-          <div className="flex justify-center pt-4">
-            <Connected>
-              <div className="flex flex-col items-center gap-1 text-sm text-mut">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Connected
-                </div>
-                <p className="text-[10px] uppercase tracking-[0.25em] text-mut/70">
-                  Powered by Megapot
-                </p>
-              </div>
-            </Connected>
-          </div>
         </div>
       )}
 
@@ -2742,6 +2821,137 @@ export default function Home() {
             >
               Done
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Megapot attribution — bottom of every tab, connected or not.
+          Nominative text use only: their ToS grants no licence to the Megapot
+          logo without written permission, which we have not asked for yet. */}
+      <p className="text-center text-[10px] uppercase tracking-[0.25em] text-mut/70">
+        Powered by Megapot
+      </p>
+
+      {/* ── Wallet sheet ─────────────────────────────────────────── */}
+      {walletSheetOpen && (
+        <div
+          className="wallet-sheet-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setWalletSheetOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="wallet-sheet-title"
+            className="wallet-sheet"
+          >
+            <div className="flex items-center justify-between gap-4">
+              <h2 id="wallet-sheet-title" className="text-xl font-heading font-extrabold text-navy">
+                Wallet
+              </h2>
+              <button
+                onClick={() => setWalletSheetOpen(false)}
+                className="ticket-picker-close"
+                aria-label="Close wallet details"
+              >
+                ×
+              </button>
+            </div>
+
+            {isConnected && address ? (
+              <>
+                <div className="wallet-sheet-rows">
+                  <div className="wallet-sheet-row">
+                    <span className="wallet-sheet-label">Status</span>
+                    <span className="flex items-center gap-2 font-semibold text-navy">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      Connected · Base
+                    </span>
+                  </div>
+                  <div className="wallet-sheet-row">
+                    <span className="wallet-sheet-label">Address</span>
+                    <button
+                      type="button"
+                      className="wallet-sheet-copy"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(address);
+                          setAddressCopied(true);
+                          haptics.select();
+                          setTimeout(() => setAddressCopied(false), 1600);
+                        } catch {
+                          /* clipboard blocked — the address is still readable above */
+                        }
+                      }}
+                    >
+                      <span className="font-mono">{shortenAddress(address)}</span>
+                      <span className="wallet-sheet-copy-hint">
+                        {addressCopied ? "Copied" : "Copy"}
+                      </span>
+                    </button>
+                  </div>
+                  <div className="wallet-sheet-row">
+                    <span className="wallet-sheet-label">Balance</span>
+                    <span className="font-semibold text-navy">
+                      {usdcBalance !== undefined ? `$${formatUSDC(usdcBalance)} USDC` : "…"}
+                    </span>
+                  </div>
+                </div>
+
+                <a
+                  href={`https://basescan.org/address/${address}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="wallet-sheet-link"
+                >
+                  View on BaseScan ↗
+                </a>
+
+                <button
+                  onClick={() => {
+                    disconnect();
+                    setWalletSheetOpen(false);
+                  }}
+                  className="wallet-sheet-disconnect"
+                >
+                  Disconnect
+                </button>
+              </>
+            ) : (
+              /* Not connected: the sheet becomes the way in, so the chip is
+                 never a dead control. It flips to the panel above by itself
+                 once the connection lands. */
+              <>
+                <div className="wallet-sheet-rows">
+                  <div className="wallet-sheet-row">
+                    <span className="wallet-sheet-label">Status</span>
+                    <span className="flex items-center gap-2 font-semibold text-navy">
+                      <span className="w-2 h-2 rounded-full bg-slate-400" />
+                      Not connected
+                    </span>
+                  </div>
+                  <div className="wallet-sheet-row">
+                    <span className="wallet-sheet-label">Network</span>
+                    <span className="font-semibold text-navy">Base</span>
+                  </div>
+                </div>
+
+                <p className="text-center text-sm text-mut">
+                  Connect to buy tickets, gift them, and claim winnings.
+                </p>
+
+                <ConnectWallet
+                  className="w-full !bg-transparent hover:!bg-transparent !p-0 !rounded-xl"
+                  disconnectedLabel={
+                    <span className="w-full py-3.5 rounded-xl font-heading font-extrabold text-base tracking-wide uppercase btn-gold inline-flex items-center justify-center">
+                      Connect wallet
+                    </span>
+                  }
+                />
+              </>
+            )}
           </div>
         </div>
       )}

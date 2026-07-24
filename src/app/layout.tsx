@@ -39,8 +39,8 @@ export async function generateMetadata(): Promise<Metadata> {
         type: "launch_miniapp",
         name,
         url: homeUrl,
-        splashImageUrl: `${rootUrl}/splash-v8.png`,
-        splashBackgroundColor: "#f3eae8",
+        splashImageUrl: `${rootUrl}/splash-v9.png`,
+        splashBackgroundColor: "#faf9f3",
       },
     },
   };
@@ -71,7 +71,27 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <RootProvider>
-      <html lang="en" className={`${anton.variable} ${archivo.variable} ${inter.variable}`}>
+      {/* suppressHydrationWarning: the inline script below stamps data-theme on
+          <html> before React hydrates, which React would otherwise flag as a
+          server/client attribute mismatch. */}
+      <html
+        lang="en"
+        suppressHydrationWarning
+        className={`${anton.variable} ${archivo.variable} ${inter.variable}`}
+      >
+        <head>
+          {/* Applies the saved theme (or the OS preference on a first visit)
+              BEFORE first paint, so midnight users never see a cream flash.
+              page.tsx reads this attribute rather than setting it. */}
+          <script
+            dangerouslySetInnerHTML={{
+              __html:
+                "try{var t=localStorage.getItem('farpot-theme');" +
+                "if(t!=='light'&&t!=='midnight')t=window.matchMedia('(prefers-color-scheme: dark)').matches?'midnight':'light';" +
+                "document.documentElement.dataset.theme=t;}catch(e){}",
+            }}
+          />
+        </head>
         <body className="min-h-screen flex flex-col antialiased">
           <SafeArea>{children}</SafeArea>
           <Analytics />
