@@ -358,7 +358,8 @@ body {
   to { transform: translateX(-50%); }
 }
 
-.ticket-picker-backdrop {
+.ticket-picker-backdrop,
+.wallet-sheet-backdrop {
   position: fixed;
   z-index: 80;
   inset: 0;
@@ -369,7 +370,8 @@ body {
   background: rgba(27, 13, 46, .66);
   backdrop-filter: blur(5px);
 }
-.ticket-picker-modal {
+.ticket-picker-modal,
+.wallet-sheet {
   width: min(100%, 480px);
   display: grid;
   gap: 20px;
@@ -393,8 +395,87 @@ body {
 }
 
 @media (min-width: 520px) {
-  .ticket-picker-backdrop { align-items: center; }
+  .ticket-picker-backdrop,
+  .wallet-sheet-backdrop { align-items: center; }
 }
+
+/* ── Header chips (theme toggle + wallet) and the wallet sheet ────── */
+.header-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: #6f42bd;
+  background: #fff;
+  border: 1px solid #e2dbec;
+  box-shadow: 0 3px 9px rgba(68, 41, 104, 0.09);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.header-chip:active { transform: scale(0.92); }
+.header-chip:hover { box-shadow: 0 5px 13px rgba(68, 41, 104, 0.15); }
+.wallet-chip-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 2px #faf8f2;
+}
+/* Chip is always present, so the dot carries the connection state. */
+.wallet-chip-dot-off { background: #b4abc4; }
+.wallet-sheet-rows { display: grid; gap: 2px; }
+.wallet-sheet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f7f4fb;
+  font-size: 14px;
+}
+.wallet-sheet-label {
+  color: #6b5787;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.wallet-sheet-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #34204f;
+  font-weight: 600;
+}
+.wallet-sheet-copy-hint {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #ece4f7;
+  color: #6f42bd;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.wallet-sheet-link {
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6f42bd;
+}
+.wallet-sheet-disconnect {
+  padding: 13px;
+  border-radius: 14px;
+  border: 1px solid #e6c9c9;
+  background: #fdf3f3;
+  color: #b4404a;
+  font-weight: 700;
+}
+.wallet-sheet-disconnect:active { transform: scale(0.99); }
 
 .quick-pick-tab { position: relative; }
 .quick-pick-tab-active {
@@ -557,14 +638,14 @@ body {
   100% { transform: scaleX(1); }
 }
 .sweat-flip {
-  animation: sweat-flip 320ms cubic-bezier(0.2, 0.8, 0.3, 1.2) both;
+  animation: sweat-flip 430ms cubic-bezier(0.2, 0.8, 0.3, 1.2) both;
 }
 @keyframes sweat-verdict-in {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: none; }
 }
 .sweat-verdict {
-  animation: sweat-verdict-in 400ms ease both;
+  animation: sweat-verdict-in 520ms ease both;
 }
 
 .claim-success-card {
@@ -583,3 +664,150 @@ body {
   .win-ticker { overflow-x: auto; }
   .win-ticker-set[aria-hidden="true"] { display: none; }
 }
+
+/* ══ Midnight theme ════════════════════════════════════════════════
+   Activated by data-theme="midnight" on <html>, set pre-paint by the
+   inline script in layout.tsx so there is no light flash.
+
+   Two sources, nothing invented:
+   · the FIELD colours (#170e2b / #241542 / #35205a) are the shipped win
+     share card's radial field, so a cast card and the app it came from
+     read as one product;
+   · the TEXT colours are the ones .jackpot-golden already used — proven
+     against this exact ground rather than freshly guessed.
+
+   These rules are unlayered, so they beat Tailwind's layered utilities
+   the same way the .app-shell light shim below does. */
+:root[data-theme="midnight"] {
+  --color-navy: #f3eee4;
+  --color-cream: #f3eee4;
+  --color-mut: #b9a8d8;
+  --color-royal: #cdb5f5;
+  --color-wins-green: #37c78f;
+  --color-win: #ff7b74;
+  --color-navy-card: #2b1a4d;
+  --color-navy-deep: #170e2b;
+  color-scheme: dark;
+}
+
+[data-theme="midnight"] body {
+  background: #170e2b radial-gradient(125% 85% at 50% 0%, #35205a 0%, #241542 52%, #170e2b 100%) no-repeat;
+}
+
+/* The .app-shell block above repaints this app's ORIGINAL dark-theme
+   utilities for cream. Under midnight those translucent whites want to be
+   translucent white again — so the shim is handed back, not fought. */
+[data-theme="midnight"] .app-shell .text-white { color: #fff; }
+[data-theme="midnight"] .app-shell [class~="bg-white/5"] { background-color: rgba(255, 255, 255, .05); }
+[data-theme="midnight"] .app-shell [class~="bg-white/10"] { background-color: rgba(255, 255, 255, .1); }
+[data-theme="midnight"] .app-shell [class~="border-white/5"],
+[data-theme="midnight"] .app-shell [class~="border-white/7"],
+[data-theme="midnight"] .app-shell [class~="border-white/10"] { border-color: rgba(255, 255, 255, .12); }
+[data-theme="midnight"] .app-shell [class~="hover:bg-white/10"]:hover,
+[data-theme="midnight"] .app-shell [class~="hover:bg-white/20"]:hover { background-color: rgba(255, 255, 255, .16); }
+[data-theme="midnight"] .app-shell [class~="hover:text-white"]:hover { color: #fff; }
+[data-theme="midnight"] .app-shell [class~="bg-black/20"],
+[data-theme="midnight"] .app-shell [class~="bg-black/30"] { background-color: rgba(0, 0, 0, .28); }
+[data-theme="midnight"] .app-shell [class~="bg-slate-300"] { background-color: rgba(255, 255, 255, .22); }
+[data-theme="midnight"] .app-shell [class~="hover:bg-slate-100"]:hover { background-color: rgba(255, 255, 255, .08); }
+
+/* Raised surfaces. On cream these are separated by drop shadows; on the
+   night field a shadow reads as nothing, so separation moves to a hairline. */
+[data-theme="midnight"] .jackpot-card {
+  background: rgba(53, 32, 90, .62);
+  border-color: rgba(205, 181, 245, .18);
+  box-shadow: none;
+}
+[data-theme="midnight"] .soft-panel,
+[data-theme="midnight"] .play-ticket-panel {
+  background: rgba(43, 26, 77, .72);
+  border-color: rgba(205, 181, 245, .16);
+  box-shadow: none;
+}
+[data-theme="midnight"] .segmented-control {
+  background: rgba(23, 14, 43, .55);
+  border-color: rgba(205, 181, 245, .14);
+}
+[data-theme="midnight"] .brand-ball-empty {
+  background: rgba(255, 255, 255, .06);
+  border-color: rgba(205, 181, 245, .18);
+  color: #b9a8d8;
+}
+[data-theme="midnight"] .claim-success-card {
+  background: linear-gradient(145deg, rgba(16, 185, 129, .18), rgba(53, 32, 90, .92));
+  border-color: rgba(55, 199, 143, .42);
+  box-shadow: none;
+}
+[data-theme="midnight"] .repeat-manage-panel { border-top-color: rgba(205, 181, 245, .16); }
+[data-theme="midnight"] .repeat-manage-panel > div {
+  background: rgba(255, 255, 255, .05);
+  color: #b9a8d8;
+}
+[data-theme="midnight"] .repeat-manage-panel strong { color: #f3eee4; }
+
+/* Modals + the wallet sheet */
+[data-theme="midnight"] .ticket-picker-modal,
+[data-theme="midnight"] .wallet-sheet {
+  background: #241542;
+  border-color: rgba(205, 181, 245, .2);
+}
+[data-theme="midnight"] .ticket-picker-modal .brand-ball-empty {
+  background: rgba(255, 255, 255, .07);
+  color: #cdb5f5;
+}
+[data-theme="midnight"] .ticket-picker-close {
+  background: rgba(255, 255, 255, .09);
+  color: #cdb5f5;
+}
+[data-theme="midnight"] .header-chip {
+  background: rgba(255, 255, 255, .09);
+  border-color: rgba(205, 181, 245, .3);
+  color: #e2d6f7;
+  box-shadow: none;
+}
+[data-theme="midnight"] .wallet-chip-dot { box-shadow: 0 0 0 2px #2b1a4d; }
+[data-theme="midnight"] .wallet-chip-dot-off { background: rgba(205, 181, 245, .55); }
+[data-theme="midnight"] .wallet-sheet-row { background: rgba(255, 255, 255, .05); }
+[data-theme="midnight"] .wallet-sheet-label { color: #a794c2; }
+[data-theme="midnight"] .wallet-sheet-copy { color: #f3eee4; }
+[data-theme="midnight"] .wallet-sheet-copy-hint {
+  background: rgba(205, 181, 245, .2);
+  color: #e6dcf7;
+}
+[data-theme="midnight"] .wallet-sheet-link { color: #cdb5f5; }
+[data-theme="midnight"] .wallet-sheet-disconnect {
+  background: rgba(255, 123, 116, .12);
+  border-color: rgba(255, 123, 116, .38);
+  color: #ff9b95;
+}
+
+/* Ticker: the handle is #8a6206 on cream, which vanishes on plum. */
+[data-theme="midnight"] .win-ticker {
+  background: rgba(23, 14, 43, .72);
+  color: #cdb5f5;
+  border-bottom-color: rgba(205, 181, 245, .16);
+  box-shadow: none;
+}
+[data-theme="midnight"] .win-ticker-handle { color: #f5c525; }
+
+/* Bottom nav pill — light surface defined here too (see page.tsx note) */
+.nav-pill {
+  background: rgba(255, 255, 255, .95);
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 10px 22px rgba(100, 116, 139, .22);
+}
+[data-theme="midnight"] .nav-pill {
+  background: rgba(23, 14, 43, .9);
+  border-color: rgba(205, 181, 245, .2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+
+/* Final hour, light mode. Golden hour's whole trick was flipping the card to
+   night, which is the theme's job now — so in light we keep only the urgency
+   cue on the countdown and drop the flip. */
+.jackpot-final-hour .jackpot-countdown {
+  color: #d9432c;
+  animation: urgent-pulse 1.15s ease-in-out infinite;
+}
+/* The note is gold-on-night; on a light card it needs a readable ink. */
+.jackpot-final-hour .golden-hour-note { color: #b3560c; }

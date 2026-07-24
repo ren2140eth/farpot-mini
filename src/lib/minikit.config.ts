@@ -26,9 +26,11 @@ export const minikitConfig = {
     description:
       "Gift and buy lottery tickets on Base, powered by Megapot. 1 USDC per ticket, daily drawings, real prizes.",
     screenshotUrls: [`${ROOT_URL}/screenshot-v4.png`],
-    iconUrl: `${ROOT_URL}/icon-v10.png`,
-    splashImageUrl: `${ROOT_URL}/splash-v8.png`,
-    splashBackgroundColor: "#f3eae8",
+    iconUrl: `${ROOT_URL}/icon-v11.png`,
+    splashImageUrl: `${ROOT_URL}/splash-v9.png`,
+    // The icon's own ground, so the splash art blends into its launch field.
+    // Re-sample from the icon (scripts/make-icon.py GROUND) if the icon changes.
+    splashBackgroundColor: "#faf9f3",
     homeUrl: ROOT_URL,
     primaryCategory: "finance",
     tags: ["farpot", "gift", "lottery", "megapot", "base"],
