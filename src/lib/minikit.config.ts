@@ -27,9 +27,12 @@ export const minikitConfig = {
       "Gift and buy lottery tickets on Base, powered by Megapot. 1 USDC per ticket, daily drawings, real prizes.",
     screenshotUrls: [`${ROOT_URL}/screenshot-v4.png`],
     iconUrl: `${ROOT_URL}/icon-v11.png`,
-    splashImageUrl: `${ROOT_URL}/splash-v9.png`,
+    // Versioned filename: Farcaster's image proxy caches by URL for a year, so a
+    // fresh name is the only reliable way to ship a changed splash.
+    // Regenerate with `node scripts/make-splash.mjs` (derives it from the icon).
+    splashImageUrl: `${ROOT_URL}/splash-v10.png`,
     // The icon's own ground, so the splash art blends into its launch field.
-    // Re-sample from the icon (scripts/make-icon.py GROUND) if the icon changes.
+    // Re-sample from the icon (scripts/make-splash.mjs GROUND) if the icon changes.
     splashBackgroundColor: "#faf9f3",
     homeUrl: ROOT_URL,
     primaryCategory: "finance",

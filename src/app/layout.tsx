@@ -39,7 +39,7 @@ export async function generateMetadata(): Promise<Metadata> {
         type: "launch_miniapp",
         name,
         url: homeUrl,
-        splashImageUrl: `${rootUrl}/splash-v9.png`,
+        splashImageUrl: `${rootUrl}/splash-v10.png`,
         splashBackgroundColor: "#faf9f3",
       },
     },
