@@ -642,13 +642,19 @@ export default function Home() {
   // Individual recent winners (top wins per settled round), resolved to
   // Farcaster identities server-side where possible — /api/winners/recent.
   const [recentWinners, setRecentWinners] = useState<TickerWinner[]>([]);
+  // The marquee must not be painted until BOTH feeds have settled — see the
+  // render gate below for why a late arrival would visibly tear the strip.
+  const [winnersSettled, setWinnersSettled] = useState(false);
   useEffect(() => {
     fetch("/api/winners/recent")
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { winners?: TickerWinner[] } | null) => {
         if (data?.winners) setRecentWinners(data.winners);
       })
-      .catch(() => {});
+      .catch(() => {})
+      // Settled means "we are done waiting", not "we got winners" — a failed
+      // lookup still lets the round headlines through.
+      .finally(() => setWinnersSettled(true));
   }, []);
 
   // Ticker interleaves each round's headline with its top winners: Farcaster
@@ -671,7 +677,16 @@ export default function Home() {
             ? `${round.winners_count.toLocaleString()} winners shared $${formatApiAmount(round.top_prize_amount)} in round ${round.id}`
             : `${round.winners_count.toLocaleString()} winners scored in round ${round.id}`,
       });
-      for (const winner of (winnersByRound.get(round.id) ?? []).slice(0, 3)) {
+      // The route sends up to 4 winners per round ordered by size, but only 3
+      // fit. Taking the top 3 blindly threw away the Farcaster identities the
+      // ticker exists to show: in live round 123 the one resolved winner was
+      // 4th by amount, so the strip rendered nothing but bare wallets. Sort
+      // identified winners first — the sort is stable, so amount order still
+      // decides within each group.
+      const roundWinners = [...(winnersByRound.get(round.id) ?? [])].sort(
+        (a, b) => Number(Boolean(b.username)) - Number(Boolean(a.username)),
+      );
+      for (const winner of roundWinners.slice(0, 3)) {
         items.push({
           key: `win-${round.id}-${winner.wallet}`,
           pfp: winner.username ? winner.pfp : null,
@@ -1588,9 +1603,24 @@ export default function Home() {
         <TabReader onTab={setActiveTab} />
         <GiftReader onGift={setGiftState} />
       </Suspense>
-      {recentWinTicker.length > 0 && (
+      {/* The strip scrolls by translateX(-50%), a percentage of the track's OWN
+          width, so its content must be final before it starts moving. The two
+          feeds land seconds apart; when the winners arrived mid-animation the
+          track nearly doubled and the same progress re-resolved to double the
+          offset — the strip teleported ~500px, landing mid-word (measured:
+          -540px → -1026px in one frame), and sped up 1.8x against the fixed
+          duration. Hence: wait for both feeds, then key the track on its
+          contents so a later change restarts the scroll cleanly from 0 instead
+          of snapping it into the middle of an address. */}
+      {recentWinTicker.length > 0 && winnersSettled && (
         <div className="win-ticker" aria-label="Recent Farpot wins">
-          <div className="win-ticker-track">
+          <div
+            className="win-ticker-track"
+            key={recentWinTicker.map((win) => win.key).join("|")}
+            // Duration tracks item count so the marquee reads at one constant
+            // speed; a fixed duration made a fuller strip scroll faster.
+            style={{ animationDuration: `${(recentWinTicker.length * 2.4).toFixed(1)}s` }}
+          >
             {[0, 1].map((copyIndex) => (
               <div className="win-ticker-set" key={copyIndex} aria-hidden={copyIndex === 1}>
                 {recentWinTicker.map((win) => (
@@ -1601,8 +1631,11 @@ export default function Home() {
                         className="win-ticker-pfp"
                         src={win.pfp}
                         alt=""
+                        // visibility, not display: hiding the box would resize
+                        // the track mid-scroll and retrigger the same teleport
+                        // the render gate above exists to prevent.
                         onError={(e) => {
-                          e.currentTarget.style.display = "none";
+                          e.currentTarget.style.visibility = "hidden";
                         }}
                       />
                     )}

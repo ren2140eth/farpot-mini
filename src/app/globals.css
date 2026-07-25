@@ -320,6 +320,9 @@ body {
 .win-ticker-track {
   display: flex;
   width: max-content;
+  /* 34s is only the fallback: page.tsx sets animation-duration inline from the
+     item count so the strip holds one constant speed however long the feed is.
+     The reduced-motion rule below still wins — it is !important. */
   animation: win-ticker-scroll 34s linear infinite;
 }
 .win-ticker-set { display: flex; flex: none; }
