@@ -51,6 +51,7 @@ CLAUDE.md
 *-proof.mjs
 *-proof.ts
 *.internal.*
+/specs/
 NOTES.md
 TODO.md
 
