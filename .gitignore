@@ -58,3 +58,9 @@ TODO.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# foundry (contracts/) — build artefacts only; src/, test/ and lib/ submodules are tracked
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+
