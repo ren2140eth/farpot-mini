@@ -81,7 +81,17 @@ export const JACKPOT_ABI = [
       { internalType: "bytes32", name: "_source", type: "bytes32" },
     ],
     name: "buyTickets",
-    outputs: [],
+    // Returns the minted ERC-721 token ids, in mint order. This said `outputs: []`
+    // until 2026-07-30, which is harmless for the app (it discards the return) but
+    // silently drops the data on the floor for any contract caller. Megapot mints with
+    // solady `_mint`, which never fires `onERC721Received`, so this return value is the
+    // ONLY way a contract recipient can learn which tickets it just bought — it is the
+    // enumeration path FarpotPool depends on.
+    // Proven by decoding a live return blob (tx 0xdd01a55c…0389, Base block 49322568):
+    // `0x…0020 | …0001 | 0xeb84…c8` decodes as `uint256[]` to exactly the token id the
+    // same trace passed to `mintTicket`. Under the old `outputs: []` the identical bytes
+    // decode to nothing.
+    outputs: [{ internalType: "uint256[]", name: "ticketIds", type: "uint256[]" }],
     stateMutability: "nonpayable",
     type: "function",
   },
@@ -110,7 +120,10 @@ export const RANDOM_TICKET_BUYER_ABI = [
       { internalType: "bytes32", name: "_source", type: "bytes32" },
     ],
     name: "buyTickets",
-    outputs: [],
+    // Same correction as the Jackpot entry above — the RandomTicketBuyer returns the
+    // minted ids too (it forwards `jackpot.buyTickets`'s return value verbatim). Both
+    // calls in the same live trace returned identical `uint256[]` bytes.
+    outputs: [{ internalType: "uint256[]", name: "ticketIds", type: "uint256[]" }],
     stateMutability: "nonpayable",
     type: "function",
   },
