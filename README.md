@@ -34,12 +34,24 @@ straight from your feed. 1 USDC per ticket, daily drawings, real prizes.
 ## Getting started
 
 ```bash
+git clone --recurse-submodules https://github.com/ren2140eth/farpot-mini
+cd farpot-mini
 npm install
 cp .env.example .env.local   # then fill in the values
 npm run dev
 ```
 
 Open http://localhost:3000.
+
+Already cloned without `--recurse-submodules`? The contracts in
+[`contracts/`](./contracts) depend on two pinned submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+The frontend builds and runs fine without them — they are only needed for
+`npm run forge:*`.
 
 ### Environment
 
@@ -51,6 +63,24 @@ Nothing secret is committed — `.env*` is gitignored.
 Contract addresses, ABIs, and the referral wallet live in
 [`src/lib/constants.ts`](./src/lib/constants.ts) — the single source of truth.
 The flow is always USDC `approve` → `buyTickets`.
+
+### Contracts
+
+[`contracts/`](./contracts) is a [Foundry](https://getfoundry.sh) project, pinned
+to solc 0.8.28 to match the deployed Megapot contracts. Dependencies are git
+submodules at release tags: forge-std `v1.16.2`, solady `v0.1.26`.
+
+```bash
+npm run forge:build
+npm run forge:test
+npm run forge:gas                       # gas report
+BASE_RPC_URL=... npm run forge:fork     # tests against live Base state
+```
+
+These wrap `forge` via [`scripts/forge.sh`](./scripts/forge.sh), which fails with
+a clear message if the submodules are uninitialised or a fork run has no RPC URL.
+`contracts/` is excluded from the Next.js typecheck, so Solidity work cannot
+affect the app build.
 
 ## Deploying your own
 

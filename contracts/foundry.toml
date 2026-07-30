@@ -13,9 +13,14 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
 
-# Deterministic, auditable bytecode.
-bytecode_hash = "none"
-cbor_metadata = false
+# Compiler metadata is deliberately RETAINED (both `bytecode_hash` and `cbor_metadata` left
+# at their defaults). An earlier draft stripped both and called it "auditable" — that was
+# backwards. The embedded metadata hash is what lets Sourcify report an exact/full match and
+# lets a reviewer bind deployed bytecode to the exact compiler settings and sources; stripping
+# it caps us at a partial match. Every Megapot contract read during design verified as
+# `exact_match` on Sourcify, and we want the same standing for a contract holding user funds.
+# We have no need for reproducible bytecode (no CREATE2 vanity address, no build attestation),
+# so there is nothing to trade for it.
 
 remappings = [
     "forge-std/=lib/forge-std/src/",
@@ -28,6 +33,10 @@ runs = 512
 [profile.default.invariant]
 runs = 256
 depth = 64
+# Tolerated only while there are no handlers. A permissive setting here can hide a harness
+# that spends most of its calls reverting instead of exploring state, so Phase 3 must bound
+# handler inputs, assert a minimum successful-call count, and flip the CI profile below to
+# `fail_on_revert = true` once expected-invalid calls are explicit.
 fail_on_revert = false
 
 # Heavier fuzzing for the accounting invariants (I1-I10) — the properties that five design
@@ -38,6 +47,9 @@ runs = 5000
 [profile.ci.invariant]
 runs = 1000
 depth = 128
+# TODO(phase 3): set to true once handlers are bounded. Left false so CI is not red before
+# the handlers exist; this is the one knob that must change when they land.
+fail_on_revert = false
 
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
