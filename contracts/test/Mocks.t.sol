@@ -40,6 +40,11 @@ contract MocksTest is Test {
     uint256 internal constant D0 = 129;
     uint256 internal constant PRICE = 1e6;
 
+    /// @dev `stringToHex("farpot-pool", { size: 32 })` — the `_source` tag FarpotPool passes.
+    ///      Written as an exact 32-byte literal rather than `bytes32("farpot-pool")` so no
+    ///      truncating cast appears in the tree; verified with `cast format-bytes32-string`.
+    bytes32 internal constant SOURCE = 0x666172706f742d706f6f6c000000000000000000000000000000000000000000;
+
     function setUp() public {
         outsider = makeAddr("outsider");
         usdc = new MockUSDC();
@@ -85,7 +90,7 @@ contract MocksTest is Test {
         assertEq(refs[0], REFERRAL, "referral wallet");
         assertEq(split.length, 1, "one split");
         assertEq(split[0], 1e18, "100% split");
-        assertEq(rtb.lastSource(), bytes32("farpot-pool"), "source");
+        assertEq(rtb.lastSource(), SOURCE, "source");
     }
 
     /// @dev Pulling the EXACT cost is what leaves a zero allowance behind — the property
@@ -309,6 +314,6 @@ contract MocksTest is Test {
         referrers[0] = REFERRAL;
         uint256[] memory split = new uint256[](1);
         split[0] = 1e18;
-        return rtb.buyTickets(count, recipient, referrers, split, bytes32("farpot-pool"));
+        return rtb.buyTickets(count, recipient, referrers, split, SOURCE);
     }
 }
