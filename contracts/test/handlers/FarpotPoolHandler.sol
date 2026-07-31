@@ -47,6 +47,23 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
     mapping(uint256 => uint256) public ghostPaidPerDrawing;
     uint256 public ghostPaidTotal;
 
+    /// @dev The high-water mark of drawings that simultaneously held a POSITIVE pot with at
+    ///      least one contributor still unclaimed.
+    ///
+    ///      I7 is the global-solvency property, and its whole reason to exist is that many
+    ///      pots share ONE USDC balance — a per-drawing bound (I5) cannot catch cross-pot
+    ///      insolvency. But if the fuzzer only ever funded one drawing at a time, I7 would
+    ///      reduce to I5 and pass without ever testing the condition it was written for.
+    ///      Counting successful `markWinners` calls does not establish this: all of them can
+    ///      land on the same current drawing. So the coexistence itself is measured, and
+    ///      `afterInvariant` fails if it never reached two.
+    uint256 public maxCoexistingUnclaimedPots;
+
+    /// @dev Distinct drawings that have EVER held a positive pot. Weaker than the above but
+    ///      useful for diagnosing which half collapsed when coverage drops.
+    uint256 public distinctFundedDrawings;
+    mapping(uint256 => bool) internal _wasFunded;
+
     /*//////////////////////////////////////////////////////////////
                             COVERAGE COUNTERS
     //////////////////////////////////////////////////////////////*/
@@ -128,6 +145,7 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
         uint16 n = uint16(bound(countSeed, 1, pool.MAX_CLAIM_BATCH()));
         pool.claimBatch(d, n);
         ++okClaimBatch;
+        _recordSolvencyCoverage();
     }
 
     function claim(uint256 actorSeed, uint256 drawingSeed) external {
@@ -147,6 +165,32 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
         ghostPaidPerDrawing[d] += paid;
         ghostPaidTotal += paid;
         ++okClaim;
+        _recordSolvencyCoverage();
+    }
+
+    /// @notice Measure how many funded drawings currently have unclaimed entitlements.
+    /// @dev Called after every state-changing action, so the high-water mark reflects what
+    ///      actually coexisted rather than what happened to be true at the end of a run.
+    function _recordSolvencyCoverage() internal {
+        uint256 n;
+        for (uint256 i; i < touchedDrawings.length; ++i) {
+            uint256 d = touchedDrawings[i];
+            if (pool.pot(d) == 0) continue;
+
+            if (!_wasFunded[d]) {
+                _wasFunded[d] = true;
+                ++distinctFundedDrawings;
+            }
+
+            for (uint256 a; a < actors.length; ++a) {
+                address who = actors[a];
+                if (pool.ticketsByUser(d, who) > 0 && !pool.claimed(d, who)) {
+                    ++n;
+                    break;
+                }
+            }
+        }
+        if (n > maxCoexistingUnclaimedPots) maxCoexistingUnclaimedPots = n;
     }
 
     /// @dev Settlement and rollover are atomic upstream, so this is one write.

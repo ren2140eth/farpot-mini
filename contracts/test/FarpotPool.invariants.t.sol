@@ -219,5 +219,18 @@ contract FarpotPoolInvariantsTest is Test {
         assertGe(handler.okMarkWinners(), 3, "coverage: pots were always zero, so I5/I7 proved nothing");
         assertGe(handler.okClaimBatch(), 10, "coverage: claimBatch never exercised enough");
         assertGe(handler.okClaim(), 5, "coverage: claim never reached");
+
+        // I7's REASON TO EXIST. Several pots share one USDC balance, which is why the
+        // per-drawing bound (I5) is necessary but not sufficient. If the fuzzer only ever
+        // funded one drawing at a time, I7 would collapse into I5 and pass green without
+        // ever testing cross-pot solvency. Counting `markWinners` calls does not establish
+        // this — they can all land on the same drawing — so the coexistence is measured
+        // directly and asserted here.
+        assertGe(handler.distinctFundedDrawings(), 2, "coverage: only one drawing was ever funded");
+        assertGe(
+            handler.maxCoexistingUnclaimedPots(),
+            2,
+            "coverage: two funded pots never coexisted unclaimed, so I7 never tested cross-pot solvency"
+        );
     }
 }

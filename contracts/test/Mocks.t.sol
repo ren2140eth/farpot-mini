@@ -143,12 +143,25 @@ contract MocksTest is Test {
         assertEq(_buy(5, address(this)).length, 6, "long");
     }
 
+    /// @dev Exactly one id lands in another drawing; the default odd index is 1.
     function test_mode_mixedDrawing() public {
         rtb.setMode(MockRandomTicketBuyer.Misbehaviour.MixedDrawing);
         uint256[] memory ids = _buy(3, address(this));
         assertEq(nft.getTicketInfo(ids[0]).drawingId, D0, "first in current drawing");
-        assertEq(nft.getTicketInfo(ids[1]).drawingId, D0 + 1, "second in the next");
-        assertEq(nft.getTicketInfo(ids[2]).drawingId, D0 + 1, "third in the next");
+        assertEq(nft.getTicketInfo(ids[1]).drawingId, D0 + 1, "second is the odd one out");
+        assertEq(nft.getTicketInfo(ids[2]).drawingId, D0, "third back in the current drawing");
+    }
+
+    /// @dev The odd index is configurable, which is what lets a test place the mismatch on
+    ///      the LAST id and so prove per-id validation reaches the end of the array.
+    function test_mode_mixedDrawing_atAConfiguredIndex() public {
+        rtb.setMode(MockRandomTicketBuyer.Misbehaviour.MixedDrawing);
+        rtb.setMixedIndex(4);
+        uint256[] memory ids = _buy(5, address(this));
+        for (uint256 i; i < 4; ++i) {
+            assertEq(nft.getTicketInfo(ids[i]).drawingId, D0, "leading ids in the current drawing");
+        }
+        assertEq(nft.getTicketInfo(ids[4]).drawingId, D0 + 1, "only the last differs");
     }
 
     function test_mode_replayIds_returns_the_set_verbatim() public {

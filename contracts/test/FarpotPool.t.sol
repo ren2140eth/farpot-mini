@@ -7,6 +7,7 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {FarpotPool} from "../src/FarpotPool.sol";
 import {IFarpotPool} from "../src/interfaces/IFarpotPool.sol";
 import {IJackpot} from "../src/interfaces/IJackpot.sol";
+import {IJackpotTicketNFT} from "../src/interfaces/IJackpotTicketNFT.sol";
 import {PoolTestBase} from "./PoolTestBase.sol";
 import {MockJackpot} from "./mocks/MockJackpot.sol";
 import {MockRandomTicketBuyer} from "./mocks/MockRandomTicketBuyer.sol";
@@ -159,11 +160,56 @@ contract FarpotPoolJoinTest is PoolTestBase {
 //////////////////////////////////////////////////////////////////////////////*/
 
 contract FarpotPoolAdversarialTest is PoolTestBase {
+    /// @dev This test also PINS THE LOOP STRUCTURE, which is why the design's §4 pseudocode
+    ///      writes `recordedTicket[id]` inside the same pass that validates it.
+    ///
+    ///      A "validate every id, then commit every id" two-pass structure — which reads as
+    ///      the safer shape, and which §9's "before any accounting is committed" wording can
+    ///      be taken to demand — CANNOT catch this case. In pass one, `recordedTicket` is
+    ///      still false for BOTH occurrences of a repeated id, because nothing has been
+    ///      written yet; pass two then records the same id twice. Demonstrated executably:
+    ///      given ids [A,B,C,A], one-pass reverts `DuplicateTicket` while two-pass accepts it
+    ///      and records 4 tickets for 3 distinct ids — over-crediting shares and jamming the
+    ///      claim cursor, the exact unrecoverable failure the check exists to prevent.
+    ///
+    ///      So Phase 4 must NOT restructure this into two passes. The ordering property that
+    ///      §9 really needs — no CONTRIBUTOR accounting before every id is validated — is
+    ///      covered by `test_foreignIdAfterValidIds_rollsBackCompletely` and the two
+    ///      per-id-coverage tests below.
     function test_duplicateIdWithinOneResponse_reverts() public {
         rtb.setMode(MockRandomTicketBuyer.Misbehaviour.DuplicateInResponse);
         vm.prank(alice);
         vm.expectRevert(IFarpotPool.DuplicateTicket.selector);
         pool.join(4);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+        PER-ID COVERAGE: every returned id gets BOTH checks (§9)
+
+      Rollback makes outcome-only tests blind to how far validation
+      actually got, so these two assert the checks reach the LAST id
+      rather than short-circuiting after the first.
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Exactly one `ownerOf` per returned id. A loop that checked only `ids[0]`, or that
+    ///      stopped early, cannot produce this count.
+    function test_join_checksOwnershipOfEveryReturnedId() public {
+        vm.expectCall(address(nft), abi.encodeWithSelector(IJackpotTicketNFT.ownerOf.selector), 5);
+        _join(alice, 5);
+    }
+
+    /// @dev The drawing mismatch is placed at the FINAL index, so it is only reachable if
+    ///      `getTicketInfo` is consulted for every id. With the odd ticket at index 1 (the
+    ///      default) a contract that checked just the first two ids would still pass.
+    function test_join_checksDrawingOfEveryId_includingTheLast() public {
+        rtb.setMode(MockRandomTicketBuyer.Misbehaviour.MixedDrawing);
+        rtb.setMixedIndex(4); // last of five
+
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.MixedDrawing.selector);
+        pool.join(5);
+
+        assertEq(pool.totalTickets(D0), 0, "and it still rolls back completely");
     }
 
     function test_idAlreadyRecordedByAnEarlierJoin_reverts() public {
@@ -578,34 +624,65 @@ contract FarpotPoolClaimTest is PoolTestBase {
         assertLt(potAmount - paid, pool.contributorCount(D0), "dust < contributorCount");
     }
 
-    /// @dev Every ordering must keep the per-drawing bound; none may let anyone claim twice.
-    function test_claim_anyOrdering_neverExceedsPot() public {
+    /// @dev EVERY ordering, not a representative one: all 3! = 6 permutations, each run from
+    ///      an independent snapshot of the same settled fixture. The invariant fuzzer gives
+    ///      probabilistic coverage of orderings; this is the exhaustive gate the design asks
+    ///      for, and it is cheap at three contributors.
+    function test_claim_everyOrdering_neverExceedsPot() public {
+        // Unequal weights totalling 9, with a pot that does NOT divide by 9 — so every
+        // claimant floors and dust is left behind. Equal weights or an exactly-divisible pot
+        // would make ordering trivially irrelevant and prove much less.
         _join(alice, 2);
         _join(bob, 3);
-        _join(carol, 5);
-        uint256 potAmount = _settleWithPot(D0, 10, 333_333);
+        _join(carol, 4);
+        uint256 potAmount = _settleWithPot(D0, 5, 200_000); // 1,000,000 over 9 tickets
+        assertGt(potAmount % 9, 0, "fixture must leave dust");
 
         uint256[] memory ds = new uint256[](1);
         ds[0] = D0;
+        address[3] memory who = [alice, bob, carol];
+        uint8[3] memory weights = [2, 3, 4];
 
-        // A rotated order, each claiming once.
-        address[3] memory order = [carol, alice, bob];
-        uint256 paid;
-        for (uint256 i; i < 3; ++i) {
-            uint256 b0 = usdc.balanceOf(order[i]);
-            vm.prank(order[i]);
-            pool.claim(ds);
-            paid += usdc.balanceOf(order[i]) - b0;
+        // Order-independent by construction: the sum of each claimant's floored share.
+        uint256 expectedTotal;
+        for (uint256 w; w < 3; ++w) {
+            expectedTotal += potAmount * weights[w] / 9;
         }
-        assertLe(paid, potAmount, "I5 holds under this ordering");
 
-        // And nobody can come back for more.
+        uint256 permutations;
         for (uint256 i; i < 3; ++i) {
-            uint256 b0 = usdc.balanceOf(order[i]);
-            vm.prank(order[i]);
-            pool.claim(ds);
-            assertEq(usdc.balanceOf(order[i]), b0, "no double claim");
+            for (uint256 j; j < 3; ++j) {
+                if (j == i) continue;
+                uint256 k = 3 - i - j; // the remaining index
+                uint256 snap = vm.snapshotState();
+
+                uint256[3] memory order = [i, j, k];
+                uint256 paid;
+                for (uint256 s; s < 3; ++s) {
+                    address a = who[order[s]];
+                    uint256 b0 = usdc.balanceOf(a);
+                    vm.prank(a);
+                    pool.claim(ds);
+                    paid += usdc.balanceOf(a) - b0;
+                }
+                assertLe(paid, potAmount, "I5 must hold under this ordering");
+                assertEq(paid, expectedTotal, "total is identical in every ordering");
+                assertLt(potAmount - paid, pool.contributorCount(D0), "dust stays bounded in every ordering");
+
+                // Nobody may come back for more, in any order.
+                for (uint256 s; s < 3; ++s) {
+                    address a = who[order[s]];
+                    uint256 b0 = usdc.balanceOf(a);
+                    vm.prank(a);
+                    pool.claim(ds);
+                    assertEq(usdc.balanceOf(a), b0, "no double claim");
+                }
+
+                vm.revertToState(snap);
+                ++permutations;
+            }
         }
+        assertEq(permutations, 6, "all 3! orderings exercised");
     }
 
     function test_claim_acrossTwoDrawingsInOneCall() public {

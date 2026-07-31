@@ -37,8 +37,11 @@ contract MockRandomTicketBuyer is IRandomTicketBuyer {
         ///      length the test requests, or `MintCountMismatch` fires first and masks the
         ///      `DuplicateTicket` this mode is meant to provoke.
         ReplayIds,
-        /// @dev Mints index 0 into the current drawing and the rest `mixedDrawingOffset`
-        ///      drawings later, so the returned ids span two drawings.
+        /// @dev Mints exactly ONE id — the one at `mixedIndex` — into a different drawing
+        ///      (`mixedDrawingOffset` later), leaving every other id in the current one, so
+        ///      the response spans two drawings. Surgical on purpose: putting the odd ticket
+        ///      last is what proves the pool checks `getTicketInfo` on every id rather than
+        ///      short-circuiting after the first mismatchable one.
         MixedDrawing,
         /// @dev Pulls one atomic unit less than approved, leaving an allowance residue.
         AllowanceResidue
@@ -51,6 +54,11 @@ contract MockRandomTicketBuyer is IRandomTicketBuyer {
     address public foreignOwner;
     uint256 public foreignIndex;
     uint256 public mixedDrawingOffset = 1;
+    /// @dev Which index lands in the OTHER drawing. Index 0 must normally stay in the
+    ///      current drawing because the pool derives `d` from `ids[0]`; putting the odd one
+    ///      last is what proves `getTicketInfo` is checked on every id rather than only on
+    ///      the early ones.
+    uint256 public mixedIndex = 1;
     uint256[] internal _replayIds;
 
     /// @dev Last-call capture. The referral wallet reaching `_referrers[0]` is the revenue
@@ -86,6 +94,10 @@ contract MockRandomTicketBuyer is IRandomTicketBuyer {
 
     function setMixedDrawingOffset(uint256 o) external {
         mixedDrawingOffset = o;
+    }
+
+    function setMixedIndex(uint256 i) external {
+        mixedIndex = i;
     }
 
     function setReplayIds(uint256[] calldata ids) external {
@@ -189,7 +201,7 @@ contract MockRandomTicketBuyer is IRandomTicketBuyer {
         if (mode == Misbehaviour.MixedDrawing) {
             ticketIds = new uint256[](_count);
             for (uint256 i; i < _count; ++i) {
-                ticketIds[i] = j.mintFor(_recipient, i == 0 ? d : d + mixedDrawingOffset);
+                ticketIds[i] = j.mintFor(_recipient, i == mixedIndex ? d + mixedDrawingOffset : d);
             }
             return ticketIds;
         }
