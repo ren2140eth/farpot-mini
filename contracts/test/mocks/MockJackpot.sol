@@ -127,13 +127,11 @@ contract MockJackpot is IJackpot {
     /// @notice Pick-your-own buy. Present because the real Jackpot has it and the corrected
     ///         `uint256[]` return type is the whole point of the ABI fix; FarpotPool itself
     ///         only ever buys through the RandomTicketBuyer.
-    function buyTickets(
-        Ticket[] calldata _tickets,
-        address _recipient,
-        address[] calldata,
-        uint256[] calldata,
-        bytes32
-    ) external override returns (uint256[] memory ticketIds) {
+    function buyTickets(Ticket[] calldata _tickets, address _recipient, address[] calldata, uint256[] calldata, bytes32)
+        external
+        override
+        returns (uint256[] memory ticketIds)
+    {
         ticketIds = new uint256[](_tickets.length);
         for (uint256 i; i < _tickets.length; ++i) {
             ticketIds[i] = mintFor(_recipient, currentDrawingId);

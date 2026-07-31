@@ -197,10 +197,7 @@ contract MockRandomTicketBuyer is IRandomTicketBuyer {
         return _mintRun(j, _recipient, d, _count);
     }
 
-    function _mintRun(MockJackpot j, address to, uint256 d, uint256 n)
-        internal
-        returns (uint256[] memory ids)
-    {
+    function _mintRun(MockJackpot j, address to, uint256 d, uint256 n) internal returns (uint256[] memory ids) {
         ids = new uint256[](n);
         for (uint256 i; i < n; ++i) {
             ids[i] = j.mintFor(to, d);

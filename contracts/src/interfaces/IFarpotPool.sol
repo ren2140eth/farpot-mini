@@ -98,9 +98,7 @@ interface IFarpotPool {
     /// @param mintedCount Ids actually returned by the buyer. Equal to `tickets` on every
     ///        successful join (`MintCountMismatch` reverts otherwise); emitted separately so
     ///        an off-chain reader can detect drift without re-deriving it.
-    event Joined(
-        uint256 indexed drawingId, address indexed contributor, uint256 tickets, uint256 mintedCount
-    );
+    event Joined(uint256 indexed drawingId, address indexed contributor, uint256 tickets, uint256 mintedCount);
 
     /// @notice `count` tickets of `drawingId` were claimed, adding `potDelta` USDC to its pot.
     /// @param potDelta A measured balance delta, never a raw balance read — the contract

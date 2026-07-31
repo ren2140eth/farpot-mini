@@ -75,17 +75,11 @@ contract MockTicketNFT is IJackpotTicketNFT {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Mint a ticket. **No receiver hook** — see the contract-level note.
-    function mintTicket(address to, uint256 tokenId, uint256 drawingId, uint256 packedTicket)
-        external
-    {
+    function mintTicket(address to, uint256 tokenId, uint256 drawingId, uint256 packedTicket) external {
         if (msg.sender != jackpot) revert NotJackpot();
         if (_ownerOf[tokenId] != address(0)) revert TokenAlreadyExists();
         _ownerOf[tokenId] = to;
-        _info[tokenId] = TrackedTicket({
-            drawingId: drawingId,
-            packedTicket: packedTicket,
-            referralScheme: bytes32(0)
-        });
+        _info[tokenId] = TrackedTicket({drawingId: drawingId, packedTicket: packedTicket, referralScheme: bytes32(0)});
         emit Transfer(address(0), to, tokenId);
     }
 
