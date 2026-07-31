@@ -63,4 +63,10 @@ next-env.d.ts
 /contracts/out/
 /contracts/cache/
 /contracts/broadcast/
+# Belt and braces: forge resolves a few paths against the working directory rather than
+# --root, so a stray `cache/` can appear at the repo root. scripts/forge.sh now cds into
+# contracts/ to prevent it; this rule means a direct `forge` invocation cannot leak either.
+/cache/
+/out/
+/broadcast/
 

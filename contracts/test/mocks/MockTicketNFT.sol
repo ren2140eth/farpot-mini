@@ -33,6 +33,15 @@ contract MockTicketNFT is IJackpotTicketNFT {
     mapping(uint256 => TrackedTicket) internal _info;
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
+    /// @dev Every id ever minted, in mint order, retained after burning.
+    ///      Added in Phase 3: `FarpotPool.ticketIds` is internal storage with no element
+    ///      accessor, so the invariant suite needs some way to enumerate the pool's tickets.
+    ///      Enumerating from the token side rather than reaching into the pool's storage
+    ///      slots keeps the invariants a statement about OBSERVABLE behaviour — they stay
+    ///      true if Phase 4 lays storage out differently, and they cannot silently pass
+    ///      because a slot calculation drifted.
+    uint256[] internal _allTokens;
+
     constructor(address _jackpot) {
         jackpot = _jackpot;
     }
@@ -70,6 +79,24 @@ contract MockTicketNFT is IJackpotTicketNFT {
         return _ownerOf[tokenId] != address(0);
     }
 
+    function allTokensLength() external view returns (uint256) {
+        return _allTokens.length;
+    }
+
+    function tokenAt(uint256 i) external view returns (uint256) {
+        return _allTokens[i];
+    }
+
+    /// @notice Live tickets `owner` holds for `drawingId`. Burned tickets are excluded, so
+    ///         this counts exactly the unclaimed tail.
+    function balanceOfDrawing(address owner, uint256 drawingId) external view returns (uint256 n) {
+        uint256 len = _allTokens.length;
+        for (uint256 i; i < len; ++i) {
+            uint256 id = _allTokens[i];
+            if (_ownerOf[id] == owner && _info[id].drawingId == drawingId) ++n;
+        }
+    }
+
     /*//////////////////////////////////////////////////////////////
                              JACKPOT-ONLY
     //////////////////////////////////////////////////////////////*/
@@ -80,6 +107,7 @@ contract MockTicketNFT is IJackpotTicketNFT {
         if (_ownerOf[tokenId] != address(0)) revert TokenAlreadyExists();
         _ownerOf[tokenId] = to;
         _info[tokenId] = TrackedTicket({drawingId: drawingId, packedTicket: packedTicket, referralScheme: bytes32(0)});
+        _allTokens.push(tokenId);
         emit Transfer(address(0), to, tokenId);
     }
 

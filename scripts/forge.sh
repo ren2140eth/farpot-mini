@@ -51,4 +51,11 @@ fi
 # --- run -----------------------------------------------------------------------------------
 command -v forge >/dev/null 2>&1 || fail "forge not found on PATH. Install Foundry: https://getfoundry.sh"
 
-exec forge "$@" --root "$CONTRACTS"
+# Run from INSIDE contracts/ rather than passing `--root`. `--root` sets where config is
+# discovered, but forge still resolves some paths against the working directory — notably the
+# invariant failure-replay cache (`cache/invariant/failures/`), which Phase 3 caught landing in
+# the REPO ROOT as an untracked, un-ignored directory that `.gitignore`'s `/contracts/cache/`
+# rule could never match. Changing directory makes every relative path resolve under
+# contracts/, which is already ignored, instead of chasing each stray writer with a new rule.
+cd "$CONTRACTS"
+exec forge "$@"

@@ -47,9 +47,19 @@ runs = 5000
 [profile.ci.invariant]
 runs = 1000
 depth = 128
-# TODO(phase 3): set to true once handlers are bounded. Left false so CI is not red before
-# the handlers exist; this is the one knob that must change when they land.
-fail_on_revert = false
+# Phase 3 flipped this, as planned: `FarpotPoolHandler` now bounds every input AND pre-checks
+# every precondition, returning early instead of calling into a revert. So under CI a revert
+# is no longer an expected outcome — it is a harness bug or a real defect, and either should
+# stop the build.
+#
+# EXPECTED RED until Phase 4 lands the contract: the skeleton reverts `Unimplemented()` on
+# every call, which is the entire point of writing the suite first. The coverage floor in
+# `afterInvariant` fails for the same reason. Both go green when the bodies are written.
+fail_on_revert = true
+# Print the per-function call distribution. A collapse in coverage then shows up in the log
+# rather than only as a pass/fail bit — the failure mode `fail_on_revert = false` is famous
+# for hiding, and which the default profile below still permits for local iteration.
+show_metrics = true
 
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
