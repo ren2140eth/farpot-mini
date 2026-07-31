@@ -12,7 +12,7 @@ import {
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { useAccount, useConfig, useDisconnect, useReadContract } from "wagmi";
-import { estimateGas, readContract, writeContract, waitForTransactionReceipt } from "wagmi/actions";
+import { estimateGas, readContract, writeContract } from "wagmi/actions";
 import { stringToHex, formatUnits, encodeFunctionData } from "viem";
 import { ConnectWallet } from "@coinbase/onchainkit/wallet";
 import { useMiniKit, useComposeCast } from "@coinbase/onchainkit/minikit";
@@ -29,6 +29,7 @@ import {
   REFERRAL_WALLET,
   MEGAPOT_API_BASE,
 } from "@/lib/constants";
+import { confirmTransaction } from "@/lib/transaction-receipt";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -1037,9 +1038,7 @@ export default function Home() {
           functionName: "approve",
           args: [targetContract, totalCost],
         });
-        const approveReceipt = await waitForTransactionReceipt(config, {
-          hash: approveHash,
-        });
+        const approveReceipt = await confirmTransaction(config, approveHash);
         if (approveReceipt.status === "reverted") {
           throw new Error("Approval transaction reverted");
         }
@@ -1112,9 +1111,7 @@ export default function Home() {
         args: buyArgs,
         gas: bufferedGas,
       });
-      const buyReceipt = await waitForTransactionReceipt(config, {
-        hash: buyHash,
-      });
+      const buyReceipt = await confirmTransaction(config, buyHash);
       if (buyReceipt.status === "reverted") {
         throw new Error("REVERTED");
       }
@@ -1267,9 +1264,7 @@ export default function Home() {
           functionName: "approve",
           args: [AUTO_SUBSCRIPTION_ADDRESS, subTotalCost],
         });
-        const approveReceipt = await waitForTransactionReceipt(config, {
-          hash: approveHash,
-        });
+        const approveReceipt = await confirmTransaction(config, approveHash);
         if (approveReceipt.status === "reverted") {
           throw new Error("Approval transaction reverted");
         }
@@ -1299,9 +1294,7 @@ export default function Home() {
           SOURCE,             // _source
         ],
       });
-      const subReceipt = await waitForTransactionReceipt(config, {
-        hash: subHash,
-      });
+      const subReceipt = await confirmTransaction(config, subHash);
       if (subReceipt.status === "reverted") {
         throw new Error("Subscription creation reverted");
       }
@@ -1340,9 +1333,7 @@ export default function Home() {
         functionName: "cancelSubscription",
         args: [],
       });
-      const cancelReceipt = await waitForTransactionReceipt(config, {
-        hash: cancelHash,
-      });
+      const cancelReceipt = await confirmTransaction(config, cancelHash);
       if (cancelReceipt.status === "reverted") {
         throw new Error("Cancel reverted");
       }
@@ -1493,7 +1484,7 @@ export default function Home() {
           functionName: "claimWinnings",
           args: [ids],
         });
-        const receipt = await waitForTransactionReceipt(config, { hash });
+        const receipt = await confirmTransaction(config, hash);
         if (receipt.status === "reverted") throw new Error("Claim reverted");
         setOptimisticallyClaimedIds((current) => {
           const next = new Set(current);
