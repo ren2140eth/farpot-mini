@@ -31,8 +31,13 @@ remappings = [
 runs = 512
 
 [profile.default.invariant]
-runs = 256
-depth = 64
+# DEPTH IS THE LOAD-BEARING KNOB HERE, not runs. Foundry resets state between invariant runs,
+# so a single run must be long enough to walk a whole pool lifecycle — join, mark winners,
+# roll over, drain the cursor, claim — and to do it for TWO drawings so the cross-pot solvency
+# property (I7) is actually exercised. At the previous depth of 64, split across 5 handler
+# functions, a run managed ~13 calls each and never got there; the coverage floor caught it.
+runs = 128
+depth = 256
 # Tolerated only while there are no handlers. A permissive setting here can hide a harness
 # that spends most of its calls reverting instead of exploring state, so Phase 3 must bound
 # handler inputs, assert a minimum successful-call count, and flip the CI profile below to
@@ -45,8 +50,8 @@ fail_on_revert = false
 runs = 5000
 
 [profile.ci.invariant]
-runs = 1000
-depth = 128
+runs = 500
+depth = 256
 # Phase 3 flipped this, as planned: `FarpotPoolHandler` now bounds every input AND pre-checks
 # every precondition, returning early instead of calling into a revert. So under CI a revert
 # is no longer an expected outcome — it is a harness bug or a real defect, and either should

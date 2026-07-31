@@ -52,6 +52,12 @@ interface IFarpotPool {
     error InvalidTicketCount();
     /// @notice The current drawing is locked for the draw. The UI says to retry shortly.
     error PoolLocked();
+    /// @notice Joining is paused. Added in Phase 4 — the design enumerates 14 errors and
+    ///         omits this one, but `pause()` has to revert with SOMETHING, and a bare
+    ///         `require` with no reason would give the frontend nothing to key friendly copy
+    ///         off. Distinct from `PoolLocked`, which is Megapot's near-draw lock and clears
+    ///         by itself; this one clears only when the owner unpauses.
+    error Paused();
     /// @notice The buyer returned a different number of ids than the tickets requested.
     error MintCountMismatch();
     /// @notice USDC allowance to the buyer was non-zero after the buy — the pool approves an

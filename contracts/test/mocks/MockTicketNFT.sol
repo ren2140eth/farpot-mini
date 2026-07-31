@@ -42,6 +42,10 @@ contract MockTicketNFT is IJackpotTicketNFT {
     ///      because a slot calculation drifted.
     uint256[] internal _allTokens;
 
+    /// @dev owner => drawingId => live (unburned) token count. Kept in step with every mint,
+    ///      burn and transfer so `balanceOfDrawing` is O(1).
+    mapping(address => mapping(uint256 => uint256)) internal _liveByOwnerDrawing;
+
     constructor(address _jackpot) {
         jackpot = _jackpot;
     }
@@ -89,12 +93,11 @@ contract MockTicketNFT is IJackpotTicketNFT {
 
     /// @notice Live tickets `owner` holds for `drawingId`. Burned tickets are excluded, so
     ///         this counts exactly the unclaimed tail.
-    function balanceOfDrawing(address owner, uint256 drawingId) external view returns (uint256 n) {
-        uint256 len = _allTokens.length;
-        for (uint256 i; i < len; ++i) {
-            uint256 id = _allTokens[i];
-            if (_ownerOf[id] == owner && _info[id].drawingId == drawingId) ++n;
-        }
+    /// @dev Maintained incrementally rather than scanned. The scanning version was O(all
+    ///      tokens ever minted) and the invariant suite calls this after EVERY fuzz call, which
+    ///      made the campaign quadratic and effectively un-runnable at a useful depth.
+    function balanceOfDrawing(address owner, uint256 drawingId) external view returns (uint256) {
+        return _liveByOwnerDrawing[owner][drawingId];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -108,6 +111,7 @@ contract MockTicketNFT is IJackpotTicketNFT {
         _ownerOf[tokenId] = to;
         _info[tokenId] = TrackedTicket({drawingId: drawingId, packedTicket: packedTicket, referralScheme: bytes32(0)});
         _allTokens.push(tokenId);
+        ++_liveByOwnerDrawing[to][drawingId];
         emit Transfer(address(0), to, tokenId);
     }
 
@@ -118,6 +122,7 @@ contract MockTicketNFT is IJackpotTicketNFT {
         address owner = _ownerOf[tokenId];
         if (owner == address(0)) revert TokenDoesNotExist();
         delete _ownerOf[tokenId];
+        --_liveByOwnerDrawing[owner][_info[tokenId].drawingId];
         emit Transfer(owner, address(0), tokenId);
     }
 
@@ -137,6 +142,9 @@ contract MockTicketNFT is IJackpotTicketNFT {
         if (_ownerOf[tokenId] != from) revert NotAuthorized();
         if (msg.sender != from && !isApprovedForAll[from][msg.sender]) revert NotAuthorized();
         _ownerOf[tokenId] = to;
+        uint256 d = _info[tokenId].drawingId;
+        --_liveByOwnerDrawing[from][d];
+        ++_liveByOwnerDrawing[to][d];
         emit Transfer(from, to, tokenId);
     }
 

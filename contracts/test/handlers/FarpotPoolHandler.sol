@@ -134,24 +134,62 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
         ++okJoin;
     }
 
+    /// @dev Chooses among drawings that are ACTUALLY claimable rather than picking blindly
+    ///      and bailing out. Blind picking wasted most of the call budget — measured runs
+    ///      where no drawing ever reached a drained cursor, so `claim` was unreachable and
+    ///      the whole settled half of the lifecycle went untested on those seeds. Selecting
+    ///      from eligible candidates also mirrors production, where the cron drains settled
+    ///      drawings rather than sampling at random. Randomness is preserved in WHICH
+    ///      candidate and in the batch size.
     function claimBatch(uint256 drawingSeed, uint256 countSeed) external {
-        if (touchedDrawings.length == 0) return;
-        uint256 d = touchedDrawings[bound(drawingSeed, 0, touchedDrawings.length - 1)];
+        uint256 d;
+        {
+            uint256 cur = jackpot.currentDrawingId();
+            uint256 len = touchedDrawings.length;
+            uint256[] memory candidates = new uint256[](len);
+            uint256 c;
+            for (uint256 i; i < len; ++i) {
+                uint256 t = touchedDrawings[i];
+                if (t >= cur) continue; // not settled yet
+                (,,,, uint256 cursor, uint256 count) = pool.poolOf(t);
+                if (cursor >= count) continue; // already drained
+                candidates[c++] = t;
+            }
+            if (c == 0) return;
+            d = candidates[bound(drawingSeed, 0, c - 1)];
+        }
 
-        if (d >= jackpot.currentDrawingId()) return; // not settled yet
-        (,,,, uint256 cursor, uint256 count) = pool.poolOf(d);
-        if (cursor >= count) return; // already drained
-
-        uint16 n = uint16(bound(countSeed, 1, pool.MAX_CLAIM_BATCH()));
+        // Bounded below MAX_CLAIM_BATCH (75) rather than at it. Two competing needs, both
+        // measured rather than assumed:
+        //   - batches must often be SMALLER than the remaining count, so the cursor advances
+        //     partially many times — that is where the idempotency risk lives (a slice being
+        //     re-covered, or a partial advance failing to roll back);
+        //   - but they must be large enough that drawings actually reach a drained cursor,
+        //     because `claim` only becomes reachable at `Settled`. Capping at 6 starved
+        //     `claim` to 0-4 per run; capping at 40 keeps both paths well exercised.
+        // The 75/76 boundary is covered exhaustively by the unit tests, which is where a
+        // boundary belongs.
+        uint16 n = uint16(bound(countSeed, 1, 40));
         pool.claimBatch(d, n);
         ++okClaimBatch;
         _recordSolvencyCoverage();
     }
 
+    /// @dev Same candidate-selection discipline as `claimBatch`, for the same reason.
     function claim(uint256 actorSeed, uint256 drawingSeed) external {
-        if (touchedDrawings.length == 0) return;
-        uint256 d = touchedDrawings[bound(drawingSeed, 0, touchedDrawings.length - 1)];
-        if (pool.poolStateOf(d) != IFarpotPool.PoolState.Settled) return;
+        uint256 d;
+        {
+            uint256 len = touchedDrawings.length;
+            uint256[] memory candidates = new uint256[](len);
+            uint256 c;
+            for (uint256 i; i < len; ++i) {
+                uint256 t = touchedDrawings[i];
+                if (pool.poolStateOf(t) != IFarpotPool.PoolState.Settled) continue;
+                candidates[c++] = t;
+            }
+            if (c == 0) return;
+            d = candidates[bound(drawingSeed, 0, c - 1)];
+        }
 
         address who = _actor(actorSeed);
         uint256[] memory ds = new uint256[](1);
@@ -194,10 +232,24 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
     }
 
     /// @dev Settlement and rollover are atomic upstream, so this is one write.
-    function rollover(uint256 seed) external {
-        // Roll over only sometimes, so drawings accumulate joins before settling.
-        if (bound(seed, 0, 3) != 0) return;
-        jackpot.setCurrentDrawingId(jackpot.currentDrawingId() + 1);
+    /// @dev Gated on the drawing being WORTH settling, not on a coin flip.
+    ///
+    ///      A probabilistic gate made lifecycle progress a lottery: each `invariant_*`
+    ///      function is its own independent campaign with its own RNG stream, so some
+    ///      campaigns rolled over plenty and reached `claim` 34 times while others never
+    ///      settled a drawing at all and left the entire settled half of the lifecycle
+    ///      untested. That is not coverage worth having, and it made any floor on `claim`
+    ///      flaky by construction.
+    ///
+    ///      Requiring a minimum size before rolling over gives both properties
+    ///      deterministically: drawings accumulate enough tickets that draining them takes
+    ///      SEVERAL batches (exercising partial cursor advances), and the rollover then
+    ///      happens reliably rather than when the dice allow.
+    function rollover() external {
+        uint256 d = jackpot.currentDrawingId();
+        (,,,,, uint256 count) = pool.poolOf(d);
+        if (count < 15) return;
+        jackpot.setCurrentDrawingId(d + 1);
         ++okRollover;
     }
 

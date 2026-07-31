@@ -115,9 +115,13 @@ contract FarpotPoolJoinTest is PoolTestBase {
     }
 
     function test_join_oneOverCap_reverts() public {
+        // Read the cap BEFORE arming the cheatcodes: an inline `_cap()` here is a staticcall
+        // that happens after `expectRevert`/`prank` are set, so it consumes them and the test
+        // silently asserts nothing.
+        uint32 overCap = _cap() + 1;
         vm.prank(alice);
         vm.expectRevert(IFarpotPool.InvalidTicketCount.selector);
-        pool.join(_cap() + 1);
+        pool.join(overCap);
     }
 
     function test_join_uint32Max_reverts() public {
@@ -335,8 +339,10 @@ contract FarpotPoolClaimBatchTest is PoolTestBase {
     function test_claimBatch_overMaxBatch_reverts() public {
         _join(alice, 1);
         _rollover();
+        // Read before arming, for the same reason as `test_join_oneOverCap_reverts`.
+        uint16 overBatch = uint16(pool.MAX_CLAIM_BATCH()) + 1;
         vm.expectRevert(IFarpotPool.InvalidBatchSize.selector);
-        pool.claimBatch(D0, uint16(pool.MAX_CLAIM_BATCH()) + 1);
+        pool.claimBatch(D0, overBatch);
     }
 
     function test_claimBatch_currentDrawing_revertsNotSettled() public {
@@ -436,6 +442,73 @@ contract FarpotPoolClaimBatchTest is PoolTestBase {
         assertEq(pool.pot(d1), secondPot, "second pot is the DELTA, not the balance");
         assertEq(pool.pot(D0), firstPot, "first pot untouched");
         assertEq(usdc.balanceOf(address(pool)), firstPot + secondPot, "both held");
+    }
+
+    /// @notice I7 (global solvency) against the exact condition it exists for: TWO funded
+    ///         pots sitting in the contract at once, both unclaimed.
+    /// @dev Deliberately a deterministic test rather than a fuzzer expectation. The invariant
+    ///      campaign gives probabilistic breadth, but foundry resets state between runs, so
+    ///      whether any single run happens to build two coexisting pots is seed-dependent —
+    ///      measured swinging between 1 and 3 across seeds. A specific REQUIRED scenario
+    ///      belongs in a test that constructs it every time; the fuzzer's coverage floor is
+    ///      left to catch collapse, which is what it is actually good at.
+    ///
+    ///      This is the case a per-drawing bound (I5) cannot catch: one USDC balance backs
+    ///      both pots, so only a global check can see an over-payment across them.
+    function test_I7_twoFundedPotsCoexistUnclaimed_balanceCoversBoth() public {
+        // Drawing D0: alice 3, bob 1. Pot 8 USDC. Settled, nobody claims.
+        _join(alice, 3);
+        _join(bob, 1);
+        uint256 potA = _makeWinners(D0, 4, 2e6);
+        _rollover();
+        _drainCursor(D0);
+
+        // Drawing D0+1: bob 2, carol 2. Pot 6 USDC. Settled, nobody claims.
+        uint256 d1 = D0 + 1;
+        _join(bob, 2);
+        _join(carol, 2);
+        uint256 potB = _makeWinners(d1, 3, 2e6);
+        _rollover();
+        _drainCursor(d1);
+
+        // Both pots are now held simultaneously and wholly unclaimed.
+        assertGt(potA, 0, "pot A funded");
+        assertGt(potB, 0, "pot B funded");
+        assertEq(pool.pot(D0), potA, "pot A intact");
+        assertEq(pool.pot(d1), potB, "pot B intact");
+        assertEq(uint8(pool.poolStateOf(D0)), uint8(IFarpotPool.PoolState.Settled), "A settled");
+        assertEq(uint8(pool.poolStateOf(d1)), uint8(IFarpotPool.PoolState.Settled), "B settled");
+
+        // I7: the single balance must cover every outstanding entitlement across BOTH pots.
+        address[3] memory who = [alice, bob, carol];
+        uint256 owedTotal;
+        for (uint256 i; i < 3; ++i) {
+            (, uint256 owedA,) = pool.shareOf(D0, who[i]);
+            (, uint256 owedB,) = pool.shareOf(d1, who[i]);
+            owedTotal += owedA + owedB;
+        }
+        assertGe(usdc.balanceOf(address(pool)), owedTotal, "I7: balance must cover both pots");
+        assertEq(usdc.balanceOf(address(pool)), potA + potB, "and holds exactly the two pots");
+
+        // Now everyone claims both drawings; the contract must stay solvent throughout.
+        uint256[] memory ds = new uint256[](2);
+        ds[0] = D0;
+        ds[1] = d1;
+        uint256 paid;
+        for (uint256 i; i < 3; ++i) {
+            uint256 b0 = usdc.balanceOf(who[i]);
+            vm.prank(who[i]);
+            pool.claim(ds);
+            paid += usdc.balanceOf(who[i]) - b0;
+        }
+
+        assertLe(paid, potA + potB, "never pays out more than both pots combined");
+        assertEq(usdc.balanceOf(address(pool)), potA + potB - paid, "residue is exactly the dust");
+        assertLt(
+            potA + potB - paid,
+            pool.contributorCount(D0) + pool.contributorCount(d1),
+            "dust bounded by contributors across both drawings"
+        );
     }
 
     function test_claimBatch_emitsBatchClaimed() public {
@@ -953,7 +1026,9 @@ contract FarpotPoolAccessTest is PoolTestBase {
     function test_pause_blocksJoin() public {
         pool.pause();
         vm.prank(alice);
-        vm.expectRevert();
+        // The specific error, not a bare `expectRevert()` — a generic one would pass even if
+        // the join failed for an unrelated reason, and the frontend keys its copy off this.
+        vm.expectRevert(IFarpotPool.Paused.selector);
         pool.join(1);
     }
 
