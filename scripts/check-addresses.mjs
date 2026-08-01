@@ -2,7 +2,7 @@
 // Fails if the Megapot addresses in Solidity disagree with src/lib/constants.ts.
 //
 // constants.ts is the project's declared source of truth, but Solidity cannot import from
-// TypeScript, so contracts/test/MegapotAddresses.sol necessarily holds a second copy. This
+// TypeScript, so contracts/src/MegapotAddresses.sol necessarily holds a second copy. This
 // check is what keeps that copy honest — without it, the Solidity side could drift from the
 // app for months and every test would still pass, because the tests and the drifted address
 // would simply agree with each other.
@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ts = readFileSync(join(root, "src/lib/constants.ts"), "utf8");
-const sol = readFileSync(join(root, "contracts/test/MegapotAddresses.sol"), "utf8");
+const sol = readFileSync(join(root, "contracts/src/MegapotAddresses.sol"), "utf8");
 
 /** name in constants.ts -> name in MegapotAddresses.sol */
 const PAIRS = [
@@ -48,7 +48,7 @@ for (const [tsName, solName] of PAIRS) {
     continue;
   }
   if (!b) {
-    console.error(`MISSING  ${solName} not found in contracts/test/MegapotAddresses.sol`);
+    console.error(`MISSING  ${solName} not found in contracts/src/MegapotAddresses.sol`);
     failed++;
     continue;
   }

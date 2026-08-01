@@ -7,7 +7,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 
 import {FarpotPool} from "../src/FarpotPool.sol";
-import {MegapotAddresses} from "./MegapotAddresses.sol";
+import {MegapotAddresses} from "../src/MegapotAddresses.sol";
 import {IFarpotPool} from "../src/interfaces/IFarpotPool.sol";
 import {IJackpot} from "../src/interfaces/IJackpot.sol";
 import {IJackpotTicketNFT} from "../src/interfaces/IJackpotTicketNFT.sol";
