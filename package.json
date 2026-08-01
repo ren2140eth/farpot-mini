@@ -9,7 +9,7 @@
     "lint": "eslint",
     "forge:build": "scripts/forge.sh build",
     "forge:test": "scripts/forge.sh test",
-    "forge:fork": "FORK=1 scripts/forge.sh test --match-path \"test/*.fork.t.sol\" --fork-url $BASE_RPC_URL",
+    "forge:fork": "FORK=1 scripts/forge.sh test --match-path \"test/*.fork.t.sol\"",
     "forge:gas": "scripts/forge.sh test --gas-report",
     "forge:fmt": "scripts/forge.sh fmt",
     "forge:fmt:check": "scripts/forge.sh fmt --check",

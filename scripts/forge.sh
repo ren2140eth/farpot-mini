@@ -37,6 +37,10 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 # --- 2. fork RPC -------------------------------------------------------------------------
+# The fork tests pin their own blocks with `vm.createSelectFork(vm.envString("BASE_RPC_URL"), n)`,
+# so BASE_RPC_URL must be exported — but do NOT also pass `--fork-url`. Doing so creates a
+# DEFAULT fork at the latest block, and executing against Base's tip makes foundry's op-revm
+# panic with "Missing operator fee scalar for isthmus L1 Block". Pinned blocks are unaffected.
 if [ "${FORK:-0}" = "1" ] && [ -z "${BASE_RPC_URL:-}" ]; then
     fail "BASE_RPC_URL is not set, and this is a fork run.
 
