@@ -6,6 +6,12 @@ export const RANDOM_TICKET_BUYER_ADDRESS = "0xb9560b43b91dE2c1DaF5dfbb76b2CFcDaF
 export const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 export const PAYOUT_CALCULATOR_ADDRESS = "0x97a22361b6208aC8cd9afaea09D20feC47046CBD" as const;
 
+// JackpotTicketNFT — the ERC-721 Megapot mints tickets as. Verified on-chain:
+// `Jackpot.jackpotNFT()` returns this, and it is assigned only inside the one-shot
+// `initialize()` which the live Jackpot has already consumed, so it cannot be swapped.
+// Needed by FarpotPool, which reads `ownerOf` / `getTicketInfo` on every pooled ticket.
+export const JACKPOT_TICKET_NFT_ADDRESS = "0x48FfE35AbB9f4780a4f1775C2Ce1c46185b366e4" as const;
+
 // Referral wallet — earns the referral fee on every ticket sale.
 // Passed as the `_referrers[0]` arg on each buy; fees are claimed with
 // `claimReferralFees()`.

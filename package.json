@@ -11,6 +11,7 @@
     "forge:test": "scripts/forge.sh test",
     "forge:fork": "FORK=1 scripts/forge.sh test --match-path \"test/*.fork.t.sol\"",
     "forge:gas": "scripts/forge.sh test --gas-report",
+    "check:addresses": "node scripts/check-addresses.mjs",
     "forge:fmt": "scripts/forge.sh fmt",
     "forge:fmt:check": "scripts/forge.sh fmt --check",
     "prepare": "git config core.hooksPath scripts/hooks || true"

@@ -4,8 +4,10 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 import {Vm} from "forge-std/Vm.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 
 import {FarpotPool} from "../src/FarpotPool.sol";
+import {MegapotAddresses} from "./MegapotAddresses.sol";
 import {IFarpotPool} from "../src/interfaces/IFarpotPool.sol";
 import {IJackpot} from "../src/interfaces/IJackpot.sol";
 import {IJackpotTicketNFT} from "../src/interfaces/IJackpotTicketNFT.sol";
@@ -28,12 +30,14 @@ interface IERC20Fork {
 ///                          settled. Settlement and rollover are atomic, so this is the
 ///                          earliest possible moment a claim for 129 can be valid.
 contract FarpotPoolForkTest is Test {
-    // Real Base mainnet addresses — must match src/lib/constants.ts.
-    address internal constant JACKPOT = 0x3bAe643002069dBCbcd62B1A4eb4C4A397d042a2;
-    address internal constant RTB = 0xb9560b43b91dE2c1DaF5dfbb76b2CFcDaFc13aBd;
-    address internal constant NFT = 0x48FfE35AbB9f4780a4f1775C2Ce1c46185b366e4;
-    address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address internal constant REFERRAL = 0xeEeC2d83DA24512D37410F7cA5B18FD805fB79d2;
+    // Sourced from ONE Solidity constant set, which `npm run check:addresses` pins against
+    // src/lib/constants.ts. Copying them per-file lets the test and a drifted address quietly
+    // agree with each other while the app disagrees with both.
+    address internal constant JACKPOT = MegapotAddresses.JACKPOT;
+    address internal constant RTB = MegapotAddresses.RANDOM_TICKET_BUYER;
+    address internal constant NFT = MegapotAddresses.TICKET_NFT;
+    address internal constant USDC = MegapotAddresses.USDC;
+    address internal constant REFERRAL = MegapotAddresses.REFERRAL_WALLET;
 
     uint256 internal constant BLOCK_OPEN = 49_363_800;
     uint256 internal constant BLOCK_LOCKED = 49_363_931;
@@ -194,21 +198,37 @@ contract FarpotPoolForkTest is Test {
       about the payout is fabricated.
     //////////////////////////////////////////////////////////////*/
 
-    function test_fork_claimBatch_overARealSettledDrawing() public {
+    /// @notice Buys `n` tickets in capped joins, returns the minted ids.
+    function _buyTickets(uint256 n) internal returns (uint256[] memory ids) {
+        vm.recordLogs();
+        uint256 cap = pool.MAX_TICKETS_PER_JOIN();
+        uint256 bought;
+        while (bought < n) {
+            uint32 batch = uint32(n - bought < cap ? n - bought : cap);
+            vm.prank(alice);
+            pool.join(batch);
+            bought += batch;
+        }
+        ids = _mintedIds();
+    }
+
+    /// @notice Correctness AND the full claim-gas profile, on a real settled drawing.
+    /// @dev Buys `MAX_CLAIM_BATCH` tickets so every required case is MEASURED rather than
+    ///      extrapolated from a smaller batch:
+    ///        - the full 75-ticket batch (the operative ceiling for the cron);
+    ///        - a pure-LOSER batch, isolated from the longest run of consecutive losers;
+    ///        - a pure-WINNER batch, from the longest run of consecutive winners;
+    ///        - per-ticket cost of a winner vs a loser, which is what answers "does a
+    ///          winner-heavy batch cost materially more".
+    ///      Runs are used because `claimBatch` walks the cursor in order: the only way to get
+    ///      a homogeneous batch out of real Megapot outcomes, which we cannot choose, is to
+    ///      advance the cursor to a run and claim exactly that run.
+    function test_fork_claimBatch_overARealSettledDrawingWithFullGasProfile() public {
         _forkAt(BLOCK_OPEN);
 
-        // FIFTY tickets, in five capped joins. Ten is not enough to guarantee the batch is
-        // actually MIXED: at roughly 1-in-4 for any prize, ten tickets all lose about 6% of
-        // the time — and measured at this block, they did, leaving a pot of 0 and proving
-        // nothing about collecting winnings. At fifty the chance of no winner is ~3e-7, so
-        // the batch reliably contains both winners and losers.
-        vm.recordLogs();
-        for (uint256 i; i < 5; ++i) {
-            vm.prank(alice);
-            pool.join(10);
-        }
-        uint256[] memory ids = _mintedIds();
-        assertEq(ids.length, 50, "fifty real tickets bought while 129 was open");
+        uint256 n = pool.MAX_CLAIM_BATCH(); // 75
+        uint256[] memory ids = _buyTickets(n);
+        assertEq(ids.length, n, "bought a full claim batch while 129 was open");
 
         // Carry the pool and the tickets across the roll; let everything else re-read.
         vm.makePersistent(address(pool));
@@ -219,37 +239,127 @@ contract FarpotPoolForkTest is Test {
         assertTrue(
             pool.jackpot().getDrawingState(DRAWING_OPEN).winningTicket != bytes32(0), "real winning ticket is stored"
         );
-        for (uint256 i; i < ids.length; ++i) {
-            assertEq(IJackpotTicketNFT(NFT).ownerOf(ids[i]), address(pool), "still ours after the roll");
+
+        // ---- classify every ticket, one claim at a time -------------------------------
+        bool[] memory won = _classify(n);
+        uint256 winners = _countTrue(won);
+        uint256 losers = n - winners;
+
+        // The batch must be genuinely MIXED. `pot > 0` alone only proves a winner exists;
+        // this proves a loser was in there too and did not poison the batch.
+        assertGt(winners, 0, "batch must contain at least one winner");
+        assertGt(losers, 0, "batch must contain at least one loser");
+        console.log("tickets", n, "winners", winners);
+        console.log("losers ", losers);
+
+        // ---- the full-size batch: the number the cron actually depends on --------------
+        _measureFullBatch(n);
+
+        // ---- homogeneous runs: a pure-loser batch and a pure-winner batch --------------
+        (uint256 loseStart, uint256 loseLen) = _longestRun(won, false);
+        (uint256 winStart, uint256 winLen) = _longestRun(won, true);
+        assertGt(loseLen, 0, "need at least one loser run");
+        assertGt(winLen, 0, "need at least one winner run");
+
+        uint256 gasLosersOnly = _measureRun(loseStart, loseLen);
+        uint256 gasWinnersOnly = _measureRun(winStart, winLen);
+
+        console.log("pure-LOSER  batch size", loseLen, "gas", gasLosersOnly);
+        console.log("  per ticket", gasLosersOnly / loseLen);
+        console.log("pure-WINNER batch size", winLen, "gas", gasWinnersOnly);
+        console.log("  per ticket", gasWinnersOnly / winLen);
+        // Multiply first: dividing to a per-ticket figure and scaling back up loses precision.
+        uint256 allWinner75 = gasWinnersOnly * 75 / winLen;
+        console.log("projected all-winner 75 batch", allWinner75);
+
+        // The binding operational claim: even priced at the measured PURE-WINNER per-ticket
+        // cost, a full 75 batch stays far inside a block. This is what makes 75 safe rather
+        // than an extrapolation from a mostly-losing sample.
+        assertLt(allWinner75, GAS_GATE, "all-winner 75 batch fits under the gate");
+    }
+
+    /// @notice Claim each ticket alone to learn which won, then restore. Also reports the
+    ///         per-ticket cost of each class, which is what a winner-heavy batch turns on.
+    function _classify(uint256 n) internal returns (bool[] memory won) {
+        uint256 snap = vm.snapshotState();
+        won = new bool[](n);
+        uint256 winnerGas;
+        uint256 loserGas;
+        uint256 winners;
+        for (uint256 i; i < n; ++i) {
+            uint256 balBefore = IERC20Fork(USDC).balanceOf(address(pool));
+            uint256 g0 = gasleft();
+            pool.claimBatch(DRAWING_OPEN, 1);
+            uint256 g = g0 - gasleft();
+            if (IERC20Fork(USDC).balanceOf(address(pool)) > balBefore) {
+                won[i] = true;
+                ++winners;
+                winnerGas += g;
+            } else {
+                loserGas += g;
+            }
         }
+        if (winners > 0) console.log("gas per single-ticket claim, winner", winnerGas / winners);
+        if (n - winners > 0) console.log("gas per single-ticket claim, loser ", loserGas / (n - winners));
+        vm.revertToState(snap);
+    }
 
-        uint256 balBefore = IERC20Fork(USDC).balanceOf(address(pool));
+    function _countTrue(bool[] memory flags) internal pure returns (uint256 n) {
+        for (uint256 i; i < flags.length; ++i) {
+            if (flags[i]) ++n;
+        }
+    }
 
-        uint256 gasBefore = gasleft();
-        pool.claimBatch(DRAWING_OPEN, 75);
-        uint256 gasUsed = gasBefore - gasleft();
+    /// @notice The full MAX_CLAIM_BATCH claim: correctness plus the operative gas ceiling.
+    function _measureFullBatch(uint256 n) internal {
+        uint256 snap = vm.snapshotState();
+        uint256 balStart = IERC20Fork(USDC).balanceOf(address(pool));
+        uint256 g0 = gasleft();
+        pool.claimBatch(DRAWING_OPEN, SafeCastLib.toUint16(n));
+        uint256 gasFull = g0 - gasleft();
 
-        (,,,,, uint256 ticketCount) = pool.poolOf(DRAWING_OPEN);
-        (,, uint256 potAmount,, uint256 cursor,) = pool.poolOf(DRAWING_OPEN);
-
-        console.log("gas claimBatch(50 real tickets)", gasUsed);
-        console.log("gas per ticket                 ", gasUsed / 50);
-        console.log("pot collected (USDC 1e6)       ", potAmount);
+        (,, uint256 potAmount,, uint256 cursor, uint256 ticketCount) = pool.poolOf(DRAWING_OPEN);
+        console.log("gas claimBatch(75), mixed", gasFull);
+        console.log("pot collected (USDC 1e6) ", potAmount);
 
         assertEq(cursor, ticketCount, "cursor drained in one batch");
         assertEq(uint8(pool.poolStateOf(DRAWING_OPEN)), uint8(IFarpotPool.PoolState.Settled), "Settled");
-
-        // A genuine mix — Megapot decided which of these fifty won, from real winning numbers.
-        // The point is that losers did NOT poison the batch: the call succeeded, and the pot
-        // is the measured delta rather than a raw balance read.
-        assertGt(potAmount, 0, "a 50-ticket batch must collect real winnings");
-        assertEq(
-            IERC20Fork(USDC).balanceOf(address(pool)) - balBefore, potAmount, "pot is exactly the measured USDC delta"
-        );
-
-        // Every ticket is burned regardless of whether it won, so a re-submission is refused.
+        assertGt(potAmount, 0, "a 75-ticket batch must collect real winnings");
+        assertEq(IERC20Fork(USDC).balanceOf(address(pool)) - balStart, potAmount, "pot is the measured delta");
+        // Every ticket is burned whether it won or not, so a re-submission is refused.
         vm.expectRevert(IFarpotPool.NothingToClaim.selector);
-        pool.claimBatch(DRAWING_OPEN, 75);
+        pool.claimBatch(DRAWING_OPEN, SafeCastLib.toUint16(n));
+        vm.revertToState(snap);
+    }
+
+    /// @notice Longest run of consecutive `target` entries. Returns (start, length).
+    function _longestRun(bool[] memory flags, bool target) internal pure returns (uint256 bestStart, uint256 bestLen) {
+        uint256 curStart;
+        uint256 curLen;
+        for (uint256 i; i < flags.length; ++i) {
+            if (flags[i] == target) {
+                if (curLen == 0) curStart = i;
+                ++curLen;
+                if (curLen > bestLen) {
+                    bestLen = curLen;
+                    bestStart = curStart;
+                }
+            } else {
+                curLen = 0;
+            }
+        }
+    }
+
+    /// @notice Gas for claiming exactly `len` tickets starting at cursor position `start`.
+    /// @dev Advances the cursor to `start` in a separate, unmeasured call first, so the
+    ///      measurement covers only the homogeneous run.
+    function _measureRun(uint256 start, uint256 len) internal returns (uint256 used) {
+        uint256 snap = vm.snapshotState();
+        if (start > 0) pool.claimBatch(DRAWING_OPEN, SafeCastLib.toUint16(start));
+        uint256 g0 = gasleft();
+        pool.claimBatch(DRAWING_OPEN, SafeCastLib.toUint16(len));
+        used = g0 - gasleft();
+        vm.revertToState(snap);
     }
 
     /*//////////////////////////////////////////////////////////////
