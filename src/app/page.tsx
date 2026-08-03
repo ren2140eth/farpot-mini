@@ -28,8 +28,13 @@ import {
   USDC_ABI,
   REFERRAL_WALLET,
   MEGAPOT_API_BASE,
+  FARPOT_POOL_ADDRESS,
+  FARPOT_POOL_ABI,
+  POOL_STATE,
+  POOL_SOFT_CAP_USDC,
 } from "@/lib/constants";
 import { confirmTransaction } from "@/lib/transaction-receipt";
+import { poolJoinLimits } from "@/lib/pool-cap";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -57,7 +62,7 @@ interface TicketSelection {
 }
 
 type BuyPhase = "idle" | "approving" | "buying" | "success" | "error";
-type TabKey = "play" | "gift" | "results";
+type TabKey = "play" | "pool" | "gift" | "results";
 type QtyPreset = "1" | "2" | "5" | "10" | "custom";
 
 function ConfettiBurst() {
@@ -390,6 +395,14 @@ function GiftReader({ onGift }: { onGift: (gift: GiftState) => void }) {
 
 // ── Gift user search state (plain gift entry) ──────────────────────
 
+interface PoolContributor {
+  address: string;
+  /** Decimal string: this wallet's ticket weight, read from contract state. */
+  tickets: string;
+  username: string | null;
+  pfp: string | null;
+}
+
 interface SearchUserResult {
   fid: number;
   username: string;
@@ -495,6 +508,17 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
               </svg>
             ),
             label: 'Gift',
+          },
+          {
+            key: 'pool' as TabKey,
+            icon: (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="9" cy="9" r="3.25" />
+                <circle cx="15.5" cy="9" r="3.25" />
+                <circle cx="12.25" cy="15" r="3.25" />
+              </svg>
+            ),
+            label: 'Pool',
           },
           {
             key: 'results' as TabKey,
@@ -888,6 +912,181 @@ export default function Home() {
 
   // ── Share-to-cast ────────────────────────────────────────────────
   const { composeCast } = useComposeCast();
+
+  // ── Pool (group buy) ──────────────────────────────────────────────
+  // Every number shown on this tab comes from the CONTRACT. The /api/pool
+  // route supplies only the list of addresses, so if it fails the tab keeps
+  // working and simply hides the faces — it can never show a wrong list.
+  const [poolQuantity, setPoolQuantity] = useState(1);
+  const [joinPhase, setJoinPhase] = useState<BuyPhase>("idle");
+  const [joinError, setJoinError] = useState("");
+  const [poolRefresh, setPoolRefresh] = useState(0);
+  const [contributors, setContributors] = useState<PoolContributor[]>([]);
+  const [contributorsDegraded, setContributorsDegraded] = useState(false);
+
+  const poolArgs = currentDrawingId !== undefined ? ([currentDrawingId] as const) : undefined;
+
+  const { data: poolData, refetch: refetchPool } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "poolOf",
+    args: poolArgs,
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
+  });
+
+  const { data: shareData, refetch: refetchShare } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "shareOf",
+    args: currentDrawingId !== undefined && address ? [currentDrawingId, address] : undefined,
+    query: { enabled: currentDrawingId !== undefined && !!address, refetchInterval: 60_000 },
+  });
+
+  // Read the cap from the contract rather than hardcoding it, so the UI and the
+  // constant can never diverge.
+  const { data: maxTicketsPerJoin } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "MAX_TICKETS_PER_JOIN",
+  });
+
+  const { data: poolPaused } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "paused",
+    query: { refetchInterval: 60_000 },
+  });
+
+  const { data: poolAllowance, refetch: refetchPoolAllowance } = useReadContract({
+    address: USDC_ADDRESS,
+    abi: USDC_ABI,
+    functionName: "allowance",
+    args: address ? [address, FARPOT_POOL_ADDRESS] : undefined,
+    query: { enabled: !!address },
+  });
+
+  const poolTickets = poolData?.[0] ?? BigInt(0);
+  const poolContributorCount = poolData?.[1] ?? BigInt(0);
+  const poolState = poolData?.[3] ?? POOL_STATE.None;
+  const yourPoolTickets = shareData?.[0] ?? BigInt(0);
+
+  // Soft cap, converted through the LIVE ticket price — never a hardcoded $1,
+  // because the price is a chain value. The arithmetic lives in pool-cap.ts so
+  // its boundaries are testable against the same code this renders from.
+  const poolTicketPrice = drawingState?.ticketPrice ?? BigInt(0);
+  const contractCap = maxTicketsPerJoin ?? BigInt(0);
+  const { maxThisJoin: poolMaxThisJoin, atCap: poolAtCap } = poolJoinLimits({
+    poolTickets,
+    ticketPrice: poolTicketPrice,
+    contractCap,
+    softCapUsdc: POOL_SOFT_CAP_USDC,
+  });
+  // Derived, not clamped into state by an effect. The pool fills underneath the
+  // user while this tab is open, so the maximum moves; deriving it every render
+  // keeps the displayed quantity in range without a setState-in-effect, and
+  // without the frame where an out-of-range number is briefly visible.
+  const poolQty = poolMaxThisJoin > 0 ? Math.min(poolQuantity, poolMaxThisJoin) : 0;
+  const poolCost = poolTicketPrice * BigInt(poolQty);
+  const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
+
+  // The contributor list is decorative; a failure hides the faces and nothing else.
+  useEffect(() => {
+    if (activeTab !== "pool" || currentDrawingId === undefined) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/pool/contributors?drawingId=${currentDrawingId}`);
+        const body = await res.json();
+        if (cancelled) return;
+        setContributors(body.contributors ?? []);
+        setContributorsDegraded(Boolean(body.degraded));
+      } catch {
+        if (cancelled) return;
+        setContributors([]);
+        setContributorsDegraded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, currentDrawingId, poolRefresh]);
+
+  const handleJoin = useCallback(async () => {
+    if (!address || poolQty < 1) return;
+    setJoinError("");
+    haptics.impact();
+    try {
+      if (poolNeedsApproval) {
+        setJoinPhase("approving");
+        const approveHash = await writeContract(config, {
+          address: USDC_ADDRESS,
+          abi: USDC_ABI,
+          functionName: "approve",
+          args: [FARPOT_POOL_ADDRESS, poolCost],
+        });
+        const approveReceipt = await confirmTransaction(config, approveHash);
+        if (approveReceipt.status === "reverted") throw new Error("Approval transaction reverted");
+      }
+      setJoinPhase("buying");
+      const hash = await writeContract(config, {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "join",
+        args: [poolQty],
+      });
+      const receipt = await confirmTransaction(config, hash);
+      if (receipt.status === "reverted") throw new Error("Join reverted");
+      setJoinPhase("success");
+      haptics.success();
+      refetchPool();
+      refetchShare();
+      refetchPoolAllowance();
+      refetchUsdcBalance();
+      // Re-pull the contributor list so the joiner sees themselves immediately.
+      setPoolRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setJoinPhase("error");
+      haptics.error();
+      // PoolLocked clears by itself; Paused does not. Distinguishing them is the
+      // whole reason the custom errors are in the ABI.
+      if (/user rejected|user denied|rejected the request/i.test(raw)) {
+        setJoinError("Join cancelled.");
+      } else if (/PoolLocked/i.test(raw)) {
+        setJoinError("The draw is about to happen — joining reopens for the next drawing.");
+      } else if (/Paused/i.test(raw)) {
+        setJoinError("Joining is paused right now. Existing pools are unaffected.");
+      } else if (/InvalidTicketCount/i.test(raw)) {
+        setJoinError(`You can join with up to ${contractCap} tickets at a time.`);
+      } else if (/transfer amount exceeds balance|insufficient/i.test(raw)) {
+        setJoinError("Not enough USDC for that many tickets.");
+      } else {
+        setJoinError("Couldn't complete the join — try again, or try fewer tickets.");
+      }
+    }
+  }, [
+    address,
+    config,
+    contractCap,
+    poolCost,
+    poolNeedsApproval,
+    poolQty,
+    refetchPool,
+    refetchPoolAllowance,
+    refetchShare,
+    refetchUsdcBalance,
+  ]);
+
+  const handleSharePool = useCallback(() => {
+    const count = Number(poolTickets);
+    composeCast({
+      text:
+        `I'm in the Farpot group pool for this draw — ${count} ticket${count === 1 ? "" : "s"} in so far.` +
+        ` More tickets, more chances to hit something together 🎰`,
+      embeds: [APP_URL],
+    });
+  }, [composeCast, poolTickets]);
+
 
   const handleShare = useCallback(() => {
     if (!drawingState) return;
@@ -2488,6 +2687,171 @@ export default function Home() {
           </button>
 
         </>
+      )}
+
+      {/* ── POOL TAB ─────────────────────────────────────────────── */}
+
+      {/* Copy rule (non-negotiable): pooling is variance reduction and social
+          play. It does NOT improve expected value — 50 people pooling have the
+          same EV as 50 buying alone, just smaller and more frequent wins. Never
+          imply better odds anywhere on this tab. */}
+      {activeTab === "pool" && (
+        <div className="space-y-6">
+          <div className="rounded-2xl p-5 bg-gradient-to-br from-royal to-royal/80">
+            <h2 className="text-lg font-heading font-extrabold text-white">This draw&rsquo;s pool</h2>
+            <p className="text-white/70 text-xs mt-1">
+              Everyone&rsquo;s tickets ride together. Win or lose, the pot splits by how many
+              tickets you put in — more tickets in play means you share in more of the small
+              wins instead of most draws ending in nothing.
+            </p>
+
+            <div className="grid grid-cols-3 gap-3 mt-4">
+              <div>
+                <p className="text-white/60 text-[11px] font-heading font-bold tracking-wide">TICKETS</p>
+                <p className="text-white font-heading font-extrabold text-xl">{poolTickets.toString()}</p>
+              </div>
+              <div>
+                <p className="text-white/60 text-[11px] font-heading font-bold tracking-wide">PLAYERS</p>
+                <p className="text-white font-heading font-extrabold text-xl">{poolContributorCount.toString()}</p>
+              </div>
+              <div>
+                <p className="text-white/60 text-[11px] font-heading font-bold tracking-wide">YOURS</p>
+                <p className="text-white font-heading font-extrabold text-xl">{yourPoolTickets.toString()}</p>
+              </div>
+            </div>
+
+            {/* Faces of everyone in. Hidden entirely when the log route is
+                degraded — numbers above still come from the contract, so the
+                tab stays useful and never shows a partial or wrong list. */}
+            {!contributorsDegraded && contributors.length > 0 && (
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                {contributors.slice(0, 12).map((c) => (
+                  <span key={c.address} className="flex items-center gap-1.5 bg-white/10 rounded-full pl-1 pr-2.5 py-1">
+                    {c.pfp ? (
+                      <Image
+                        src={c.pfp}
+                        alt=""
+                        width={20}
+                        height={20}
+                        className="rounded-full"
+                        unoptimized
+                        /* visibility, never display: collapsing the box would
+                           reflow the row on every failed avatar. */
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
+                        }}
+                      />
+                    ) : (
+                      <span className="w-5 h-5 rounded-full bg-white/20" />
+                    )}
+                    <span className="text-white text-[11px] font-heading font-bold">
+                      {c.username ? `@${c.username}` : `${c.address.slice(0, 6)}…${c.address.slice(-4)}`}
+                    </span>
+                    <span className="text-white/50 text-[11px]">{c.tickets}</span>
+                  </span>
+                ))}
+                {contributors.length > 12 && (
+                  <span className="text-white/60 text-[11px] font-heading font-bold">
+                    +{contributors.length - 12} more
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Join */}
+          <div className="rounded-2xl p-5 bg-white/5">
+            {poolPaused ? (
+              <p className="text-white/80 text-sm">
+                Joining is paused right now. Pools that already bought their tickets are
+                unaffected — claiming always stays open.
+              </p>
+            ) : drawingState?.jackpotLock ? (
+              <p className="text-white/80 text-sm">
+                The draw is about to happen, so joining is closed for a few minutes. It reopens
+                for the next drawing.
+              </p>
+            ) : poolAtCap ? (
+              <p className="text-white/80 text-sm">
+                This draw&rsquo;s pool is full for now — we&rsquo;re keeping pools to a soft cap
+                of ${(Number(POOL_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw while the contract
+                is still being audited. It reopens with the next drawing.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-white font-heading font-bold text-sm">Tickets to add</span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setPoolQuantity(Math.max(1, poolQty - 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      −
+                    </button>
+                    <span className="text-white font-heading font-extrabold w-8 text-center">
+                      {poolQty}
+                    </span>
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setPoolQuantity(Math.min(poolMaxThisJoin, poolQty + 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <p className="text-white/50 text-[11px] mt-2">
+                  Up to {poolMaxThisJoin} per join — join as often as you like.
+                </p>
+
+                {isConnected ? (
+                  <button
+                    onClick={handleJoin}
+                    disabled={joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)}
+                    className="w-full mt-4 py-3 rounded-xl bg-gold text-navy font-heading font-extrabold disabled:opacity-50"
+                  >
+                    {joinPhase === "approving"
+                      ? "Approving…"
+                      : joinPhase === "buying"
+                        ? "Joining…"
+                        : `Join with ${poolQty} ticket${poolQty === 1 ? "" : "s"} · $${formatUnits(poolCost, USDC_DECIMALS)}`}
+                  </button>
+                ) : (
+                  <div className="mt-4">
+                    <ConnectWallet />
+                  </div>
+                )}
+
+                {joinPhase === "success" && (
+                  <div className="mt-3">
+                    <p className="text-wins-green text-sm font-heading font-bold">You&rsquo;re in 🎰</p>
+                    <button
+                      onClick={handleSharePool}
+                      className="mt-2 text-gold text-xs font-heading font-bold underline"
+                    >
+                      Share on Farcaster
+                    </button>
+                  </div>
+                )}
+                {joinError && <p className="text-coral text-sm mt-3">{joinError}</p>}
+              </>
+            )}
+          </div>
+
+          {/* Lifecycle. A Claimable pool must NOT show a payout figure: shareOf
+              reports only the pot collected so far while claimBatch is still
+              draining, so a number here would be wrong and then change. */}
+          {poolState === POOL_STATE.Claimable && (
+            <p className="text-white/70 text-sm">
+              This pool&rsquo;s draw is settling — winnings are still being collected.
+            </p>
+          )}
+        </div>
       )}
 
       {/* ── RESULTS TAB ──────────────────────────────────────────── */}
