@@ -59,8 +59,9 @@ const LOCK_KEY = `mm:pool:${V}:lock`;
 const addrsKey = (drawingId: bigint) => `mm:pool:${V}:addrs:${drawingId}`;
 const frozenKey = (drawingId: bigint) => `mm:pool:${V}:frozen:${drawingId}`;
 
-// Long enough to cover a cold scan, short enough that a crashed holder frees it quickly.
-const LOCK_TTL_SECONDS = 30;
+// Long enough to cover a bounded cold scan (many 10k-block chunks against a rate-limited RPC),
+// short enough that a crashed holder frees it reasonably quickly.
+const LOCK_TTL_SECONDS = 120;
 
 // Note the SDK is configured with `automaticDeserialization` left at its default, and every
 // value written here is a plain string or set member, so nothing round-trips through JSON.
@@ -114,19 +115,30 @@ export async function isFrozen(drawingId: bigint): Promise<boolean> {
 }
 
 /**
- * Take the scan lock. Returns false if another instance holds it.
+ * Take the scan lock. Returns an ownership token, or null if another instance holds it.
  *
- * Correctness does not depend on this — set writes are idempotent and the cursor only moves
- * forward — but two Vercel instances scanning the same range at once is pure waste against a
- * rate-limited RPC, and losing the lock is a reason to serve cached data, not to fail.
+ * Correctness of the DATA does not depend on this — set writes are idempotent and a regressed
+ * cursor only causes an idempotent re-scan — but two instances scanning at once multiplies RPC
+ * work against a rate-limited endpoint, so the lock is worth having and worth having correct.
+ *
+ * The token is what makes release safe. An earlier version wrote a constant "1" and released
+ * with an unconditional DEL, which lets a slow holder delete its SUCCESSOR's lock: if scan A
+ * overruns the TTL, B acquires the freed key, then A finishes and deletes B's lock, admitting
+ * a third scan while B is still running. Every holder now deletes only its own lock.
  */
-export async function acquireLock(): Promise<boolean> {
-  // The SDK returns "OK" on acquisition and null when the key already exists, so this no
-  // longer rests on my reading of the raw REST reply.
-  const res = await client().set(LOCK_KEY, "1", { nx: true, ex: LOCK_TTL_SECONDS });
-  return res === "OK";
+export async function acquireLock(): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const res = await client().set(LOCK_KEY, token, { nx: true, ex: LOCK_TTL_SECONDS });
+  return res === "OK" ? token : null;
 }
 
-export async function releaseLock(): Promise<void> {
-  await client().del(LOCK_KEY);
+/** Compare-and-delete: releases the lock only if this caller still owns it. */
+export async function releaseLock(token: string): Promise<void> {
+  // GET-then-DEL from the client would race in exactly the window this exists to close, so the
+  // comparison has to happen inside Redis.
+  await client().eval(
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+    [LOCK_KEY],
+    [token],
+  );
 }

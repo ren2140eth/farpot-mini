@@ -12,6 +12,12 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The Foundry project. `npm run lint` takes no path, so without these it walks the
+    // vendored solady/forge-std submodules and reports failures in code we do not own —
+    // which made the lint gate unusable as a signal for our own changes.
+    "contracts/lib/**",
+    "contracts/out/**",
+    "contracts/cache/**",
   ]),
 ]);
 

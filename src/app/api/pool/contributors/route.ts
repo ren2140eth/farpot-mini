@@ -169,15 +169,15 @@ export async function GET(request: Request) {
     return degraded(drawingId);
   }
 
-  let locked = false;
+  let lockToken: string | null = null;
   try {
     const head = await client.getBlockNumber();
     const confirmedHead = head > CONFIRMATIONS ? head - CONFIRMATIONS : BigInt(0);
 
     // A frozen drawing's list is final, so skip the scan entirely and serve the cache.
     if (!(await isFrozen(drawingId))) {
-      locked = await acquireLock();
-      if (locked) {
+      lockToken = await acquireLock();
+      if (lockToken) {
         await scan(confirmedHead);
 
         // Freeze check — §5's three conditions, satisfied together.
@@ -222,6 +222,16 @@ export async function GET(request: Request) {
 
     const identities = await resolveIdentities(addresses);
 
+    // If ANY weight read failed, the list we could build is incomplete — and an incomplete
+    // list is indistinguishable from a complete one to the user, who would see a real player
+    // missing. Silently skipping the failures and returning degraded:false would also cache
+    // that incomplete answer at the CDN for the revalidate window. Degrade instead: numbers
+    // only, no faces, which is the invariant this route exists to hold.
+    if (weights.some((w) => w?.status !== "success")) {
+      console.error("[pool:contributors] weight read failed for at least one address");
+      return degraded(drawingId);
+    }
+
     const contributors: Contributor[] = [];
     addresses.forEach((address, i) => {
       const result = weights[i];
@@ -256,9 +266,9 @@ export async function GET(request: Request) {
     console.error("[pool:contributors] scan failed:", err);
     return degraded(drawingId);
   } finally {
-    if (locked) {
+    if (lockToken) {
       try {
-        await releaseLock();
+        await releaseLock(lockToken);
       } catch {
         /* the TTL frees it anyway */
       }

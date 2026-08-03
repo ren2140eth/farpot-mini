@@ -11,7 +11,7 @@ import {
 } from "react";
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
-import { useAccount, useConfig, useDisconnect, useReadContract } from "wagmi";
+import { useAccount, useConfig, useDisconnect, useReadContract, useReadContracts } from "wagmi";
 import { estimateGas, readContract, writeContract } from "wagmi/actions";
 import { stringToHex, formatUnits, encodeFunctionData } from "viem";
 import { ConnectWallet } from "@coinbase/onchainkit/wallet";
@@ -32,9 +32,12 @@ import {
   FARPOT_POOL_ABI,
   POOL_STATE,
   POOL_SOFT_CAP_USDC,
+  POOL_FIRST_DRAWING,
+  POOL_HISTORY_LOOKBACK,
 } from "@/lib/constants";
 import { confirmTransaction } from "@/lib/transaction-receipt";
 import { poolJoinLimits } from "@/lib/pool-cap";
+import { poolHistoryRange, poolRowState } from "@/lib/pool-history";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -923,6 +926,8 @@ export default function Home() {
   const [poolRefresh, setPoolRefresh] = useState(0);
   const [contributors, setContributors] = useState<PoolContributor[]>([]);
   const [contributorsDegraded, setContributorsDegraded] = useState(false);
+  const [poolClaimError, setPoolClaimError] = useState("");
+  const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
 
   const poolArgs = currentDrawingId !== undefined ? ([currentDrawingId] as const) : undefined;
 
@@ -1076,6 +1081,105 @@ export default function Home() {
     refetchShare,
     refetchUsdcBalance,
   ]);
+
+  // ── Past pools: the claim path ────────────────────────────────────
+  //
+  // `poolOf`/`shareOf` above are read for the CURRENT drawing only, which can never be
+  // Claimable or Settled — those states exist exclusively for drawings that have rolled over.
+  // Without this block the Claimable/Settled UI is unreachable and a contributor loses all
+  // access to their winnings the moment the drawing ends. (It was, and they did.)
+  const pastDrawingIds = useMemo(
+    () =>
+      currentDrawingId === undefined
+        ? []
+        : poolHistoryRange({
+            currentDrawingId,
+            firstDrawing: POOL_FIRST_DRAWING,
+            lookback: POOL_HISTORY_LOOKBACK,
+          }),
+    [currentDrawingId],
+  );
+
+  // Two entries per drawing, one multicall. `shareOf` carries the user's weight, what they are
+  // owed and whether they already claimed; `poolStateOf` gates whether the figure may be shown
+  // at all.
+  const { data: pastPoolReads, refetch: refetchPastPools } = useReadContracts({
+    contracts: pastDrawingIds.flatMap((d) => [
+      {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "shareOf" as const,
+        args: [d, address as `0x${string}`] as const,
+      },
+      {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "poolStateOf" as const,
+        args: [d] as const,
+      },
+    ]),
+    query: {
+      enabled: activeTab === "pool" && !!address && pastDrawingIds.length > 0,
+      refetchInterval: 60_000,
+    },
+  });
+
+  const myPastPools = useMemo(() => {
+    if (!pastPoolReads) return [];
+    const out: {
+      drawingId: bigint;
+      tickets: bigint;
+      owed: bigint;
+      hasClaimed: boolean;
+      state: number;
+    }[] = [];
+    pastDrawingIds.forEach((drawingId, i) => {
+      const share = pastPoolReads[i * 2];
+      const state = pastPoolReads[i * 2 + 1];
+      // A failed read is skipped rather than rendered as a zero — showing "you won $0" because
+      // an RPC call failed is worse than showing nothing.
+      if (share?.status !== "success" || state?.status !== "success") return;
+      const [tickets, owed, hasClaimed] = share.result as readonly [bigint, bigint, boolean];
+      if (tickets === BigInt(0)) return; // never joined this drawing
+      out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
+    });
+    return out;
+  }, [pastPoolReads, pastDrawingIds]);
+
+  const handleClaimPool = useCallback(
+    async (drawingId: bigint) => {
+      if (!address) return;
+      setPoolClaimError("");
+      setClaimingDrawing(drawingId);
+      haptics.impact();
+      try {
+        const hash = await writeContract(config, {
+          address: FARPOT_POOL_ADDRESS,
+          abi: FARPOT_POOL_ABI,
+          functionName: "claim",
+          args: [[drawingId]],
+        });
+        const receipt = await confirmTransaction(config, hash);
+        if (receipt.status === "reverted") throw new Error("Claim reverted");
+        haptics.success();
+        refetchPastPools();
+        refetchUsdcBalance();
+      } catch (err: unknown) {
+        const raw = err instanceof Error ? err.message : String(err);
+        haptics.error();
+        setPoolClaimError(
+          /user rejected|user denied|rejected the request/i.test(raw)
+            ? "Claim cancelled."
+            : /NotSettled/i.test(raw)
+              ? "This pool is still settling — try again shortly."
+              : "Couldn't confirm the claim. If your USDC balance went up it went through.",
+        );
+      } finally {
+        setClaimingDrawing(null);
+      }
+    },
+    [address, config, refetchPastPools, refetchUsdcBalance],
+  );
 
   const handleSharePool = useCallback(() => {
     const count = Number(poolTickets);
@@ -2843,13 +2947,72 @@ export default function Home() {
             )}
           </div>
 
-          {/* Lifecycle. A Claimable pool must NOT show a payout figure: shareOf
-              reports only the pot collected so far while claimBatch is still
-              draining, so a number here would be wrong and then change. */}
-          {poolState === POOL_STATE.Claimable && (
-            <p className="text-white/70 text-sm">
-              This pool&rsquo;s draw is settling — winnings are still being collected.
-            </p>
+          {/* Your past pools — the claim path.
+              A Claimable pool must NOT show a payout figure: shareOf reports only the pot
+              collected so far while claimBatch is still draining, so a number here would be
+              wrong and would then change under the user. Only Settled is final. */}
+          {isConnected && myPastPools.length > 0 && (
+            <div>
+              <h3 className="text-white font-heading font-extrabold text-sm mb-2">Your past pools</h3>
+              <div className="space-y-2">
+                {myPastPools.map((p) => (
+                  <div
+                    key={p.drawingId.toString()}
+                    className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <p className="text-white font-heading font-bold text-sm">
+                        Draw #{p.drawingId.toString()}
+                      </p>
+                      <p className="text-white/60 text-xs">
+                        {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
+                      </p>
+                    </div>
+
+                    {(() => {
+                      const row = poolRowState(p);
+                      switch (row.kind) {
+                        case "settling":
+                          return (
+                            <span className="text-white/70 text-xs font-heading font-bold">
+                              Settling…
+                            </span>
+                          );
+                        case "pending":
+                          return <span className="text-white/50 text-xs">—</span>;
+                        case "claimed":
+                          return (
+                            <span className="text-wins-green text-xs font-heading font-bold">
+                              ✓ claimed
+                            </span>
+                          );
+                        case "claimable":
+                          return (
+                            <button
+                              onClick={() => handleClaimPool(p.drawingId)}
+                              disabled={claimingDrawing === p.drawingId}
+                              className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
+                            >
+                              {claimingDrawing === p.drawingId
+                                ? "Claiming…"
+                                : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
+                            </button>
+                          );
+                        default:
+                          /* Settled with nothing owed: the pool's tickets did not win. Say so
+                             plainly rather than showing a $0.00 claim button. */
+                          return (
+                            <span className="text-white/50 text-xs font-heading font-bold">
+                              No win this draw
+                            </span>
+                          );
+                      }
+                    })()}
+                  </div>
+                ))}
+              </div>
+              {poolClaimError && <p className="text-coral text-sm mt-2">{poolClaimError}</p>}
+            </div>
           )}
         </div>
       )}

@@ -151,6 +151,17 @@ export const POOL_STATE = {
   Settled: 3,
 } as const;
 
+// The drawing that was current when FarpotPool was deployed — the first one it could
+// possibly hold tickets for. Used as the floor when scanning back for a user's past pools,
+// so the lookback never queries drawings that predate the contract.
+export const POOL_FIRST_DRAWING = BigInt(133);
+
+// How many past drawings the Pool tab checks for an unclaimed share. Bounded because every
+// candidate costs two multicall entries. Megapot draws daily, so this is ~6 weeks of history.
+// Older pools stay claimable ON-CHAIN forever — `claim()` has no deadline — they would just
+// need a log-based lookup to surface in the UI. Revisit if the app is ever idle that long.
+export const POOL_HISTORY_LOOKBACK = 45;
+
 // Soft-launch cap on total pool size PER DRAWING, in USDC (6 decimals) — $500.
 //
 // Advisory, not enforced: the contract has no total cap, `join()` is callable directly, and
