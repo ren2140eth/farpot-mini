@@ -118,7 +118,11 @@ contract DeployFarpotPool is Script {
         require(tickets == 0 && contributors == 0, "fresh pool is not empty");
 
         console2.log("FarpotPool          ", address(pool));
-        console2.log("deployment block    ", block.number);
+        // NOT the deployment block. During a broadcast this is the block the SIMULATION ran
+        // against, and the transaction lands a few blocks later — the real deploy logged
+        // 49497965 here and mined in 49497969. Take the deployment block from the receipt
+        // (`cast receipt <hash>`) or from broadcast/…/run-latest.json, never from this line.
+        console2.log("simulated at block  ", block.number);
         console2.log("chain id            ", block.chainid);
         console2.log("owner               ", pool.owner());
         console2.log("signer (deployer)   ", signer);

@@ -69,5 +69,23 @@ show_metrics = true
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
 
-[etherscan]
-base = { key = "${BASESCAN_API_KEY}", chain = 8453 }
+# There is deliberately NO [etherscan] section.
+#
+# It used to read `base = { key = "${BASESCAN_API_KEY}", chain = 8453 }`, and it broke source
+# verification outright: foundry resolves that env var eagerly, so with BASESCAN_API_KEY unset
+# `forge script --verify --verifier sourcify` failed with "environment variable
+# `BASESCAN_API_KEY` not found" AFTER the contract had already been deployed — and setting the
+# variable to a dummy made foundry announce "ETHERSCAN_API_KEY is set, defaulting to Etherscan
+# verifier" and ignore `--verifier sourcify` entirely. Either way Sourcify was unreachable.
+#
+# Verification therefore runs on Sourcify, which needs no API key:
+#
+#     forge verify-contract <address> src/FarpotPool.sol:FarpotPool \
+#       --chain-id 8453 --verifier sourcify
+#
+# Confirm the result reports `"match": "exact_match"` (Sourcify's current name for a full
+# match) rather than a partial one — retaining compiler metadata in this file is what earns it.
+# If Basescan verification is ever wanted, pass `--etherscan-api-key` on the command line
+# instead of reinstating this section.
+
+

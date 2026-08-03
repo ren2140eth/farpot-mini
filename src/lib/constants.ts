@@ -17,6 +17,26 @@ export const JACKPOT_TICKET_NFT_ADDRESS = "0x48FfE35AbB9f4780a4f1775C2Ce1c46185b
 // `claimReferralFees()`.
 export const REFERRAL_WALLET = "0xeEeC2d83DA24512D37410F7cA5B18FD805fB79d2" as const;
 
+// FarpotPool — the group-buy pool contract (contracts/src/FarpotPool.sol).
+// Deployed to Base 2026-08-03, source-verified on Sourcify with an EXACT match
+// (creation and runtime): https://repo.sourcify.dev/8453/0x0F28287571E0e81a4352594B6D2e46761A88D320
+// The owner's only power is pause()/unpause(), which blocks
+// join() alone — claimBatch() and claim() keep working while paused, so pausing can never
+// strand funds. All five constructor dependencies were read back off-chain and match the
+// addresses above.
+export const FARPOT_POOL_ADDRESS = "0x0F28287571E0e81a4352594B6D2e46761A88D320" as const;
+
+// The block FarpotPool was deployed in, taken from the transaction receipt
+// (0xc24b0dde…acb7ab). This is the cold-cache `fromBlock` for any Joined-log scan — never
+// use 0, which would scan the whole chain.
+//
+// Do NOT take this from the deploy script's console output: that line prints the block the
+// SIMULATION ran against (it said 49497965), while the transaction actually mined in 49497969.
+// `BigInt(…)` rather than a `49497969n` literal: tsconfig targets ES2017, which rejects
+// BigInt literal syntax outright ("BigInt literals are not available when targeting lower
+// than ES2020"). The value is a bigint either way, which is what viem's `fromBlock` wants.
+export const FARPOT_POOL_DEPLOY_BLOCK = BigInt(49497969);
+
 // Base chain ID
 export const BASE_CHAIN_ID = 8453;
 
