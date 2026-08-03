@@ -57,6 +57,9 @@ const V = "v1";
 const CURSOR_KEY = `mm:pool:${V}:cursor`;
 const LOCK_KEY = `mm:pool:${V}:lock`;
 const addrsKey = (drawingId: bigint) => `mm:pool:${V}:addrs:${drawingId}`;
+// Reverse index: every drawing a wallet has ever joined. Populated by the SAME scan that fills
+// the forward index, so it costs no extra RPC and can never disagree with it.
+const mineKey = (address: string) => `mm:pool:${V}:mine:${address.toLowerCase()}`;
 const frozenKey = (drawingId: bigint) => `mm:pool:${V}:frozen:${drawingId}`;
 
 // Long enough to cover a bounded cold scan (many 10k-block chunks against a rate-limited RPC),
@@ -93,6 +96,37 @@ export async function addContributors(drawingId: bigint, addresses: string[]): P
   if (addresses.length === 0) return;
   const members = addresses.map((a) => a.toLowerCase());
   await client().sadd(addrsKey(drawingId), members[0], ...members.slice(1));
+}
+
+/**
+ * Record which drawings a wallet has joined. Idempotent, like the forward index.
+ *
+ * This exists so the claim UI has NO expiry window. A bounded look-back over recent drawings
+ * is cheap but recreates the original defect on a delay: a user returning after the window has
+ * passed can no longer discover — or claim — winnings that are still theirs on-chain forever.
+ */
+export async function addContributorDrawings(
+  address: string,
+  drawingIds: bigint[],
+): Promise<void> {
+  if (drawingIds.length === 0) return;
+  const members = drawingIds.map((d) => d.toString());
+  await client().sadd(mineKey(address), members[0], ...members.slice(1));
+}
+
+/** Every drawing this wallet has joined, oldest-first ordering not guaranteed. */
+export async function getContributorDrawings(address: string): Promise<bigint[]> {
+  const raw = (await client().smembers<string[]>(mineKey(address))) ?? [];
+  return raw
+    .map((d) => {
+      try {
+        return BigInt(d);
+      } catch {
+        return null;
+      }
+    })
+    .filter((d): d is bigint => d !== null)
+    .sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
 }
 
 export async function getContributors(drawingId: bigint): Promise<string[]> {

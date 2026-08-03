@@ -926,6 +926,7 @@ export default function Home() {
   const [poolRefresh, setPoolRefresh] = useState(0);
   const [contributors, setContributors] = useState<PoolContributor[]>([]);
   const [contributorsDegraded, setContributorsDegraded] = useState(false);
+  const [yourPoolDrawings, setYourPoolDrawings] = useState<bigint[]>([]);
   const [poolClaimError, setPoolClaimError] = useState("");
   const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
 
@@ -1000,21 +1001,27 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/pool/contributors?drawingId=${currentDrawingId}`);
+        const res = await fetch(
+          `/api/pool/contributors?drawingId=${currentDrawingId}${address ? `&address=${address}` : ""}`,
+        );
         const body = await res.json();
         if (cancelled) return;
         setContributors(body.contributors ?? []);
         setContributorsDegraded(Boolean(body.degraded));
+        setYourPoolDrawings(
+          ((body.yourDrawings ?? []) as string[]).map((d) => BigInt(d)),
+        );
       } catch {
         if (cancelled) return;
         setContributors([]);
         setContributorsDegraded(true);
+        setYourPoolDrawings([]);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [activeTab, currentDrawingId, poolRefresh]);
+  }, [activeTab, currentDrawingId, address, poolRefresh]);
 
   const handleJoin = useCallback(async () => {
     if (!address || poolQty < 1) return;
@@ -1088,17 +1095,24 @@ export default function Home() {
   // Claimable or Settled — those states exist exclusively for drawings that have rolled over.
   // Without this block the Claimable/Settled UI is unreachable and a contributor loses all
   // access to their winnings the moment the drawing ends. (It was, and they did.)
-  const pastDrawingIds = useMemo(
-    () =>
-      currentDrawingId === undefined
-        ? []
-        : poolHistoryRange({
-            currentDrawingId,
-            firstDrawing: POOL_FIRST_DRAWING,
-            lookback: POOL_HISTORY_LOOKBACK,
-          }),
-    [currentDrawingId],
-  );
+  // The wallet's FULL history from the log index (no expiry — claim() has no deadline on
+  // chain, so the UI must not invent one), unioned with a bounded recent window. The window is
+  // the fallback: if the log route is unavailable the user still sees and can claim recent
+  // pools, rather than losing the claim path entirely whenever the index is down.
+  const pastDrawingIds = useMemo(() => {
+    if (currentDrawingId === undefined) return [];
+    const recent = poolHistoryRange({
+      currentDrawingId,
+      firstDrawing: POOL_FIRST_DRAWING,
+      lookback: POOL_HISTORY_LOOKBACK,
+    });
+    const seen = new Set(recent.map((d) => d.toString()));
+    const older = yourPoolDrawings.filter(
+      (d) => d < currentDrawingId && !seen.has(d.toString()),
+    );
+    // Newest first across both sources.
+    return [...recent, ...older].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
+  }, [currentDrawingId, yourPoolDrawings]);
 
   // Two entries per drawing, one multicall. `shareOf` carries the user's weight, what they are
   // owed and whether they already claimed; `poolStateOf` gates whether the figure may be shown

@@ -22,6 +22,8 @@ import {
 import {
   acquireLock,
   addContributors,
+  addContributorDrawings,
+  getContributorDrawings,
   cacheEnabled,
   freezeDrawing,
   getContributors,
@@ -94,20 +96,30 @@ async function scan(confirmedHead: bigint): Promise<void> {
       toBlock: to,
     });
 
-    // Group by drawing so each drawing takes one SADD.
+    // Two indexes off one pass: drawing → addresses (the "who's in" row) and address →
+    // drawings (the claim history). Deriving both here means they cannot drift apart, and the
+    // reverse index costs no extra RPC.
     const byDrawing = new Map<bigint, Set<string>>();
+    const byAddress = new Map<string, Set<bigint>>();
     for (const log of logs) {
       const args = (log as { args?: { drawingId?: bigint; contributor?: string } }).args;
       if (args?.drawingId === undefined || !args.contributor) continue;
+      const who = args.contributor.toLowerCase();
       const set = byDrawing.get(args.drawingId) ?? new Set<string>();
-      set.add(args.contributor.toLowerCase());
+      set.add(who);
       byDrawing.set(args.drawingId, set);
+      const drawings = byAddress.get(who) ?? new Set<bigint>();
+      drawings.add(args.drawingId);
+      byAddress.set(who, drawings);
     }
 
-    // Addresses FIRST, cursor LAST. A crash between them re-scans this chunk, which is
-    // idempotent; the opposite order would skip it and lose those contributors for good.
+    // Both indexes FIRST, cursor LAST. A crash between them re-scans this chunk, which is
+    // idempotent; the opposite order would skip it and lose those records for good.
     for (const [drawingId, addresses] of byDrawing) {
       await addContributors(drawingId, [...addresses]);
+    }
+    for (const [who, drawings] of byAddress) {
+      await addContributorDrawings(who, [...drawings]);
     }
     await setCursor(to);
 
@@ -146,6 +158,7 @@ async function resolveIdentities(addresses: string[]): Promise<Map<string, Neyna
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const requested = url.searchParams.get("drawingId");
+  const forAddress = url.searchParams.get("address");
 
   let drawingId: bigint;
   try {
@@ -174,8 +187,16 @@ export async function GET(request: Request) {
     const head = await client.getBlockNumber();
     const confirmedHead = head > CONFIRMATIONS ? head - CONFIRMATIONS : BigInt(0);
 
+    // Is the cache COMPLETE enough to serve as authoritative? Serving an address list that
+    // another instance is still mid-scan on would present a partial list as the whole truth,
+    // and then cache it at the CDN — the same defect the failed-multicall check closes, coming
+    // in through incomplete DISCOVERY rather than incomplete weights.
+    let complete = false;
+
     // A frozen drawing's list is final, so skip the scan entirely and serve the cache.
-    if (!(await isFrozen(drawingId))) {
+    if (await isFrozen(drawingId)) {
+      complete = true;
+    } else {
       lockToken = await acquireLock();
       if (lockToken) {
         await scan(confirmedHead);
@@ -195,15 +216,30 @@ export async function GET(request: Request) {
           blockNumber: confirmedHead,
         });
         if (idAtConfirmedHead > drawingId) await freezeDrawing(drawingId);
+        // We just scanned to confirmedHead ourselves, so the cache is current by construction.
+        complete = true;
+      } else {
+        // Another instance holds the lock. Duplicating its scan would be waste, so instead ask
+        // whether the cache is ALREADY current: if the cursor has reached this request's
+        // confirmed head, whatever that instance is doing cannot add anything we would miss.
+        // If it has not, the cache is mid-flight and must not be served as complete.
+        const cursor = await getCursor();
+        complete = cursor !== null && cursor >= confirmedHead;
       }
-      // Not holding the lock is fine: another instance is scanning, and stale-by-one-poll is
-      // a better answer than a duplicated scan against a rate-limited RPC.
     }
+
+    if (!complete) return degraded(drawingId);
+
+    // Every drawing this wallet has joined, with no expiry window — a bounded look-back would
+    // recreate the unreachable-claim defect on a delay, since claim() has no deadline on-chain.
+    const yourDrawings = forAddress
+      ? (await getContributorDrawings(forAddress)).map((d) => d.toString())
+      : [];
 
     const addresses = await getContributors(drawingId);
     if (addresses.length === 0) {
       return NextResponse.json(
-        { drawingId: drawingId.toString(), contributors: [], degraded: false },
+        { drawingId: drawingId.toString(), contributors: [], yourDrawings, degraded: false },
         { headers: { "cache-control": `s-maxage=${REVALIDATE_SECONDS}, stale-while-revalidate` } },
       );
     }
@@ -259,7 +295,7 @@ export async function GET(request: Request) {
     });
 
     return NextResponse.json(
-      { drawingId: drawingId.toString(), contributors, degraded: false },
+      { drawingId: drawingId.toString(), contributors, yourDrawings, degraded: false },
       { headers: { "cache-control": `s-maxage=${REVALIDATE_SECONDS}, stale-while-revalidate` } },
     );
   } catch (err) {
@@ -279,7 +315,7 @@ export async function GET(request: Request) {
 /** Numbers-only response: the client hides the avatar row and renders contract totals. */
 function degraded(drawingId: bigint) {
   return NextResponse.json(
-    { drawingId: drawingId.toString(), contributors: [], degraded: true },
+    { drawingId: drawingId.toString(), contributors: [], yourDrawings: [], degraded: true },
     { headers: { "cache-control": "no-store" } },
   );
 }
