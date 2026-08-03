@@ -37,6 +37,128 @@ export const FARPOT_POOL_ADDRESS = "0x0F28287571E0e81a4352594B6D2e46761A88D320" 
 // than ES2020"). The value is a bigint either way, which is what viem's `fromBlock` wants.
 export const FARPOT_POOL_DEPLOY_BLOCK = BigInt(49497969);
 
+// FarpotPool ABI — only what the app actually calls, transcribed from
+// contracts/src/interfaces/IFarpotPool.sol (the compiler-enforced surface).
+//
+// The custom errors are included deliberately even though the app never calls them: viem
+// decodes a revert against the ABI, so without them a failed join surfaces as raw bytes and
+// the UI cannot tell "the draw is about to happen, try again shortly" (PoolLocked, clears by
+// itself) from "joining is paused" (Paused, clears only when the owner unpauses).
+export const FARPOT_POOL_ABI = [
+  // --- constants ---
+  {
+    inputs: [],
+    name: "MAX_TICKETS_PER_JOIN",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "paused",
+    outputs: [{ internalType: "bool", name: "", type: "bool" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  // --- mutative ---
+  {
+    inputs: [{ internalType: "uint32", name: "tickets", type: "uint32" }],
+    name: "join",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [{ internalType: "uint256[]", name: "drawingIds", type: "uint256[]" }],
+    name: "claim",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  // --- views ---
+  // poolState is the derived lifecycle: None=0, Accumulating=1, Claimable=2, Settled=3.
+  {
+    inputs: [{ internalType: "uint256", name: "drawingId", type: "uint256" }],
+    name: "poolOf",
+    outputs: [
+      { internalType: "uint256", name: "tickets", type: "uint256" },
+      { internalType: "uint256", name: "contributors", type: "uint256" },
+      { internalType: "uint256", name: "potAmount", type: "uint256" },
+      { internalType: "uint8", name: "poolState", type: "uint8" },
+      { internalType: "uint256", name: "cursor", type: "uint256" },
+      { internalType: "uint256", name: "ticketCount", type: "uint256" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  // `owed` is ONLY a final figure once poolState === Settled. While Claimable it reflects the
+  // pot collected so far, so the UI must not show it as a payout — see POOL_STATE below.
+  {
+    inputs: [
+      { internalType: "uint256", name: "drawingId", type: "uint256" },
+      { internalType: "address", name: "who", type: "address" },
+    ],
+    name: "shareOf",
+    outputs: [
+      { internalType: "uint256", name: "tickets", type: "uint256" },
+      { internalType: "uint256", name: "owed", type: "uint256" },
+      { internalType: "bool", name: "hasClaimed", type: "bool" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "drawingId", type: "uint256" }],
+    name: "poolStateOf",
+    outputs: [{ internalType: "uint8", name: "", type: "uint8" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  // --- events ---
+  // Both drawingId and contributor are indexed, so the contributor route filters the current
+  // drawing by topic instead of scanning history.
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: "uint256", name: "drawingId", type: "uint256" },
+      { indexed: true, internalType: "address", name: "contributor", type: "address" },
+      { indexed: false, internalType: "uint256", name: "tickets", type: "uint256" },
+      { indexed: false, internalType: "uint256", name: "mintedCount", type: "uint256" },
+    ],
+    name: "Joined",
+    type: "event",
+  },
+  // --- errors (for decoding reverts into friendly copy) ---
+  { inputs: [], name: "InvalidTicketCount", type: "error" },
+  { inputs: [], name: "PoolLocked", type: "error" },
+  { inputs: [], name: "Paused", type: "error" },
+  { inputs: [], name: "MintCountMismatch", type: "error" },
+  { inputs: [], name: "AllowanceResidue", type: "error" },
+  { inputs: [], name: "DuplicateTicket", type: "error" },
+  { inputs: [], name: "InvalidTicketOwner", type: "error" },
+  { inputs: [], name: "MixedDrawing", type: "error" },
+  { inputs: [], name: "NotSettled", type: "error" },
+  { inputs: [], name: "NothingToClaim", type: "error" },
+  { inputs: [], name: "InvalidBatchSize", type: "error" },
+] as const;
+
+// The pool's derived lifecycle, matching IFarpotPool.PoolState by declaration order.
+// Do not reorder — the numbers come from the enum, and the contract's test suite asserts them.
+export const POOL_STATE = {
+  None: 0,
+  Accumulating: 1,
+  Claimable: 2,
+  Settled: 3,
+} as const;
+
+// Soft-launch cap on total pool size PER DRAWING, in USDC (6 decimals) — $500.
+//
+// Advisory, not enforced: the contract has no total cap, `join()` is callable directly, and
+// two people can pass the check in the same block and land the pool slightly over. Copy must
+// therefore never promise a hard limit. It exists to bound the routine case until the audit,
+// and is expressed in USDC rather than tickets so it converts through the LIVE ticket price.
+export const POOL_SOFT_CAP_USDC = BigInt(500_000_000);
+
 // Base chain ID
 export const BASE_CHAIN_ID = 8453;
 
