@@ -80,6 +80,10 @@ const haltKey = (drawingId: bigint) => `mm:pool:${V}:crank:halt:${drawingId}`;
 const HALT_SET_KEY = `mm:pool:${V}:crank:halted`;
 // Last observed drawing id, for §8.1's "has not advanced" half of the staleness test.
 const STALE_ID_KEY = `mm:pool:${V}:stale:lastid`;
+// Consecutive runs where cranking could not complete. Escalation is based on PERSISTENCE, not on
+// any single failure: one RPC blip is noise, but the same blip every day means the money path has
+// silently stopped and nobody has been told.
+const FAIL_STREAK_KEY = `mm:pool:${V}:crank:failstreak`;
 const alertKey = (kind: string, key: string) => `mm:pool:${V}:alert:${kind}:${key}`;
 
 // Alerts re-fire weekly rather than never: an unfixed jam should resurface, just not daily.
@@ -223,9 +227,20 @@ export interface HaltRecord {
   reason: string;
 }
 
+/**
+ * Persist a halt. **Set membership first, detail second** — the same write-order rule the scan
+ * cursor documents, for the same reason.
+ *
+ * Discovery is what cannot be reconstructed: if the SADD lands and the detail write fails, the
+ * drawing is still found by `listHalts` and merely reports a vague reason. In the other order a
+ * failure leaves a drawing that `getHalt` knows about but `listHalts` cannot enumerate — and
+ * since the crank cursor moves past halts, nothing would ever look at it again.
+ *
+ * Errors are NOT swallowed. The caller must be able to tell a recorded halt from a lost one.
+ */
 export async function recordHalt(drawingId: bigint, record: HaltRecord): Promise<void> {
-  await client().set(haltKey(drawingId), JSON.stringify(record));
   await client().sadd(HALT_SET_KEY, drawingId.toString());
+  await client().set(haltKey(drawingId), JSON.stringify(record));
 }
 
 /**
@@ -293,6 +308,21 @@ export async function getLastSeenDrawingId(): Promise<bigint | null> {
 
 export async function setLastSeenDrawingId(drawingId: bigint): Promise<void> {
   await client().set(STALE_ID_KEY, drawingId.toString());
+}
+
+/** Consecutive failed/skipped crank runs. Zero when the last run completed. */
+export async function getCrankFailStreak(): Promise<number> {
+  const raw = await client().get<string | number | null>(FAIL_STREAK_KEY);
+  const n = Number(raw ?? 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+export async function bumpCrankFailStreak(): Promise<number> {
+  return await client().incr(FAIL_STREAK_KEY);
+}
+
+export async function clearCrankFailStreak(): Promise<void> {
+  await client().set(FAIL_STREAK_KEY, "0");
 }
 
 export async function alertAlreadySent(kind: string, key: string): Promise<boolean> {

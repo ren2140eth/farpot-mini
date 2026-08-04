@@ -15,7 +15,9 @@ import {
   JACKPOT_ADDRESS,
 } from "./constants";
 import {
+  bumpCrankFailStreak,
   cacheEnabled,
+  clearCrankFailStreak,
   getCrankCursor,
   getHalt,
   getLastSeenDrawingId,
@@ -79,6 +81,47 @@ export interface CrankOutcome {
   detail?: string;
   report?: CrankReport;
   alerted: boolean;
+  /**
+   * The run did not complete its work, whatever the notification half did.
+   *
+   * Separate from `alerted` because the cron's HTTP status must reflect BOTH. A crank that fails
+   * on RPC every single day is not "no alert fired, so all is well" — it is the money path
+   * silently stopped, and answering 200 would defeat the failed-cron backstop that is supposed to
+   * catch exactly that.
+   */
+  degraded: boolean;
+}
+
+// One bad tick is noise; two in a row on a daily cron means a day and a half of no claims. `error`
+// escalates immediately because it means cranking actually broke, while `skipped` (a read that
+// could not be completed) gets one grace tick before paging.
+const SKIP_STREAK_BEFORE_ALERT = 2;
+
+/** Record a failed/incomplete run and decide whether it has now gone on long enough to page. */
+async function noteCrankFailure(
+  status: "skipped" | "error",
+  detail: string,
+): Promise<boolean> {
+  let streak = 1;
+  if (cacheEnabled) {
+    try {
+      streak = await bumpCrankFailStreak();
+    } catch {
+      // No counter means no history to judge persistence by. Escalate rather than stay quiet:
+      // a silent money path is the worse failure.
+      streak = SKIP_STREAK_BEFORE_ALERT;
+    }
+  }
+  if (status === "error" || streak >= SKIP_STREAK_BEFORE_ALERT) {
+    await raiseAlert({
+      kind: "crank-disabled",
+      key: `crank-failing`,
+      message: `pool cranking has not completed for ${streak} consecutive run(s) — settled winnings may be sitting uncollected`,
+      detail,
+    });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -102,7 +145,7 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
       message: "POOL_KEEPER_PRIVATE_KEY is malformed — no winnings can be collected",
       detail: err,
     });
-    return { status: "error", detail: String(err), alerted: true };
+    return { status: "error", detail: String(err), alerted: true, degraded: true };
   }
 
   // Is there anything to do at all? Answer this BEFORE worrying about the keeper, because "no
@@ -112,7 +155,9 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
   if (!account) {
     const pending = await pendingWork(publicClient, currentDrawingId, cursor);
     if (pending === null) {
-      return { status: "skipped", detail: "no keeper key; pending work unknown (RPC failed)", alerted: false };
+      const detail = "no keeper key; pending work unknown (RPC failed)";
+      await noteCrankFailure("skipped", detail);
+      return { status: "skipped", detail, alerted: false, degraded: true };
     }
     if (pending) {
       await raiseAlert({
@@ -121,9 +166,9 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
         message:
           "settled pool tickets are waiting to be claimed but POOL_KEEPER_PRIVATE_KEY is not set — winnings are sitting on Megapot uncollected",
       });
-      return { status: "disabled", detail: "keeper key unset with work pending", alerted: true };
+      return { status: "disabled", detail: "keeper key unset with work pending", alerted: true, degraded: true };
     }
-    return { status: "disabled", detail: "keeper key unset; nothing pending", alerted: false };
+    return { status: "disabled", detail: "keeper key unset; nothing pending", alerted: false, degraded: false };
   }
 
   const walletClient = createWalletClient({ account, chain: base, transport: transport() });
@@ -140,7 +185,9 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
   } catch (err) {
     // No ceiling read means no safe count to send, and guessing one is how a hardcoded 75 gets
     // reintroduced. Skip the run; the next tick retries.
-    return { status: "skipped", detail: `MAX_CLAIM_BATCH unreadable: ${err}`, alerted: false };
+    const detail = `MAX_CLAIM_BATCH unreadable: ${err}`;
+    await noteCrankFailure("skipped", detail);
+    return { status: "skipped", detail, alerted: false, degraded: true };
   }
 
   let report: CrankReport;
@@ -155,8 +202,12 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
         maxClaimBatch,
         deadline: Date.now() + CRANK_BUDGET_MS,
         isHalted: async (d) => (cacheEnabled ? (await getHalt(d).catch(() => null))?.reason ?? null : null),
+        // Deliberately NOT `.catch(() => {})`. A swallowed failure here reads as a recorded
+        // halt, and the cursor would then step past a jam that `listHalts` can never
+        // rediscover — stranding the winnings with nothing left to report them.
         onHalt: async (d, kind, reason) => {
-          if (cacheEnabled) await recordHalt(d, { kind, reason }).catch(() => {});
+          if (!cacheEnabled) throw new Error("no cache configured — a halt cannot be recorded");
+          await recordHalt(d, { kind, reason });
         },
       },
       currentDrawingId,
@@ -166,8 +217,12 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
     // A read failure here is transient by nature (RPC blip, multicall timeout). It is NOT an
     // alert: the next tick retries, and paging on every RPC hiccup is how an alert channel
     // becomes noise nobody reads.
+    // A single blip is transient and the next tick retries — but a run that keeps failing must
+    // NOT keep answering 200. `degraded` carries that to the HTTP status regardless of alerting,
+    // and `noteCrankFailure` pages once the failure stops looking transient.
     console.error("[cron:crank] run failed:", err);
-    return { status: "error", detail: String(err), keeper: account.address, alerted: false };
+    const alerted = await noteCrankFailure("error", String(err));
+    return { status: "error", detail: String(err), keeper: account.address, alerted, degraded: true };
   }
 
   // Balance check AFTER the run, so the report reflects what the keeper has left rather than
@@ -248,11 +303,18 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
     if (from === null || next > from) await setCrankCursor(next).catch(() => {});
   }
 
+  if (cacheEnabled) await clearCrankFailStreak().catch(() => {});
+
   return {
     status: "ok",
     keeper: account.address,
     report,
     alerted: firedAlert,
+    // A run that completed but left drawings unfinished, jammed, or unrecordable is not healthy
+    // even when the weekly dedupe suppressed its alert.
+    degraded: report.drawings.some(
+      (d) => d.outcome === "fatal" || d.outcome === "terminal" || d.haltPersisted === false,
+    ),
   };
 }
 

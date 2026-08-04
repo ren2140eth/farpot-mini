@@ -167,6 +167,16 @@ export interface DrawingCrankResult {
   lastBatchSize: number;
   txs: Hex[];
   reason?: string;
+  /**
+   * Whether this drawing's halt was durably recorded.
+   *
+   * `false` means the drawing is jammed AND we failed to write that down, which is strictly
+   * worse than either alone: the cursor would move past it (halts do not block the cursor) while
+   * `listHalts` cannot rediscover it, so its winnings would never be retried or even reported
+   * again. The cursor therefore treats an unpersisted halt as unfinished — retrying a jammed
+   * drawing costs a few estimate calls, whereas losing one strands real money.
+   */
+  haltPersisted?: boolean;
 }
 
 export interface CrankReport {
@@ -201,7 +211,13 @@ export function nextCrankCursor(from: bigint, report: CrankReport): bigint {
 
   const unfinished = new Set(
     report.drawings
-      .filter((d) => d.outcome === "partial" || d.outcome === "not-settled")
+      .filter(
+        (d) =>
+          d.outcome === "partial" ||
+          d.outcome === "not-settled" ||
+          // A halt we could not write down must not be walked past — see `haltPersisted`.
+          d.haltPersisted === false,
+      )
       .map((d) => d.drawingId),
   );
 

@@ -75,14 +75,14 @@ function isReceiptTimeout(err: unknown): boolean {
   return text.includes("timed out while waiting") || text.includes("could not be found");
 }
 
-// How many drawings a single run will inspect. Megapot draws daily and the cron runs daily, so
-// in steady state this is 1; the width exists so a cron outage catches up over a few runs
-// instead of needing a manual poke.
-export const CRANK_SCAN_LIMIT = 50;
+// `poolOf` reads are batched this many per multicall. Purely a request-size limit, NOT a limit
+// on how far back the scan looks.
+const MULTICALL_CHUNK = 50;
 
-// Fallback window when the Redis cursor is unavailable. Cranking must not be gated on the cache
-// — it is the money path — so with no cursor it inspects a bounded recent window instead.
-export const CRANK_COLD_LOOKBACK = BigInt(30);
+// Hard ceiling on drawings inspected in one run, so a cold scan is bounded rather than unbounded.
+// Megapot draws daily, so this is over a decade of history — it exists to stop a pathological
+// `currentDrawingId` producing an enormous run, not to express a retention policy.
+export const CRANK_SCAN_LIMIT = 4000;
 
 export interface CrankContext {
   publicClient: PoolPublicClient;
@@ -404,9 +404,14 @@ export async function findPendingDrawings(
   currentDrawingId: bigint,
   cursor: bigint | null,
 ): Promise<PendingScan> {
+  // No cursor means start at the FIRST drawing the pool could have joined — never a recent-N
+  // window. An age cutoff here is not a performance trade-off, it is data loss: `claim()` has no
+  // on-chain deadline, so a drawing that fell out of the window while the cache was empty would
+  // never be scanned again, and its contributors' winnings would sit uncollected forever with
+  // nothing reporting it. That is the same defect Phase 8's second sweep fixed in the UI and the
+  // halt set fixed in the cron; the cost of avoiding it is a few extra multicalls on a cold run.
   const floor = POOL_FIRST_DRAWING;
-  const coldStart = currentDrawingId > CRANK_COLD_LOOKBACK ? currentDrawingId - CRANK_COLD_LOOKBACK : floor;
-  let from = cursor ?? coldStart;
+  let from = cursor ?? floor;
   if (from < floor) from = floor;
 
   // `claimBatch` reverts NotSettled for anything at or above the current drawing, so the last
@@ -417,24 +422,28 @@ export async function findPendingDrawings(
   const candidates: bigint[] = [];
   for (let d = from; d <= to && candidates.length < CRANK_SCAN_LIMIT; d++) candidates.push(d);
 
-  // `allowFailure: false` on purpose. A partial read here would silently look like "nothing to
-  // claim", which is Phase 8's finding 2 wearing a different hat: better to skip the run and
-  // retry than to act confidently on an incomplete picture.
-  const snapshots = (await publicClient.multicall({
-    contracts: candidates.map((d) => ({
-      address: FARPOT_POOL_ADDRESS,
-      abi: FARPOT_POOL_ABI,
-      functionName: "poolOf" as const,
-      args: [d] as const,
-    })),
-    allowFailure: false,
-  })) as readonly (readonly [bigint, bigint, bigint, number, bigint, bigint])[];
-
   const pending: bigint[] = [];
-  for (let i = 0; i < candidates.length; i++) {
-    const [, , , , cur, ticketCount] = snapshots[i];
-    // Zero tickets = a drawing the pool never joined; cursor at the end = already drained.
-    if (ticketCount > BigInt(0) && cur < ticketCount) pending.push(candidates[i]);
+  // Chunked so a cold scan over years of history is many small requests rather than one request
+  // no RPC would answer. `allowFailure: false` on purpose: a partial read would silently look
+  // like "nothing to claim", which is Phase 8's finding 2 wearing a different hat — better to
+  // fail the run and retry than to act confidently on an incomplete picture.
+  for (let offset = 0; offset < candidates.length; offset += MULTICALL_CHUNK) {
+    const chunk = candidates.slice(offset, offset + MULTICALL_CHUNK);
+    const snapshots = (await publicClient.multicall({
+      contracts: chunk.map((d) => ({
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "poolOf" as const,
+        args: [d] as const,
+      })),
+      allowFailure: false,
+    })) as readonly (readonly [bigint, bigint, bigint, number, bigint, bigint])[];
+
+    for (let i = 0; i < chunk.length; i++) {
+      const [, , , , cur, ticketCount] = snapshots[i];
+      // Zero tickets = a drawing the pool never joined; cursor at the end = already drained.
+      if (ticketCount > BigInt(0) && cur < ticketCount) pending.push(chunk[i]);
+    }
   }
 
   return { from, to, candidates, pending };
@@ -494,7 +503,21 @@ export async function crankSettledDrawings(
 
     if (result.outcome === "fatal" || result.outcome === "terminal") {
       const kind = result.outcome === "terminal" ? "crank-terminal" : "crank-fatal";
-      await ctx.onHalt(drawingId, kind, result.reason ?? result.outcome);
+      // The halt has to be DURABLE before this drawing counts as dealt with. If the write fails,
+      // say so on the result: the cursor then stops here instead of stepping over a jam that
+      // nothing can rediscover.
+      try {
+        await ctx.onHalt(drawingId, kind, result.reason ?? result.outcome);
+        result.haltPersisted = true;
+      } catch (err) {
+        result.haltPersisted = false;
+        report.alerts.push({
+          kind: "crank-fatal",
+          key: `halt-write-${drawingId}`,
+          message: `drawing ${drawingId} is jammed AND its halt could not be recorded — it will be retried rather than forgotten`,
+          detail: String(err),
+        });
+      }
       report.alerts.push({
         kind,
         key: `drawing-${drawingId}`,

@@ -102,16 +102,29 @@ export async function GET(req: Request) {
     stale = { error: String(err) };
   }
 
-  let crank: Awaited<ReturnType<typeof runCrank>> | { status: "error"; detail: string; alerted: false } | undefined;
+  let crank:
+    | Awaited<ReturnType<typeof runCrank>>
+    | { status: "error"; detail: string; alerted: false; degraded: true }
+    | undefined;
   try {
     crank = await runCrank(currentId);
   } catch (err) {
     console.error("[cron:notify] crank threw:", err);
-    crank = { status: "error", detail: String(err), alerted: false };
+    crank = { status: "error", detail: String(err), alerted: false, degraded: true };
   }
   console.log("[cron:crank] status", crank.status, JSON.stringify(crank));
 
-  const needsAttention = Boolean(crank.alerted || (stale && "alerted" in stale && stale.alerted));
+  // `degraded` is here, not just `alerted`, and that is the whole point of the backstop.
+  // Alerts dedupe weekly and some failures never alert at all, so keying the HTTP status on
+  // alerting alone would let cranking fail EVERY day while the cron reported success — which is
+  // precisely the silent-money-path failure this channel exists to catch. A monitor that threw
+  // counts too: it means the §8.1 stop condition did not run.
+  const needsAttention = Boolean(
+    crank.alerted ||
+      crank.degraded ||
+      (stale && "alerted" in stale && stale.alerted) ||
+      (stale && "error" in stale),
+  );
 
   // Every response carries the pool result, and an alerted run answers 500 regardless of how the
   // notification half went. That non-2xx IS an alert channel: Vercel marks the run failed and
