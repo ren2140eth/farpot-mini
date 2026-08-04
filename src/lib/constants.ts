@@ -53,6 +53,16 @@ export const FARPOT_POOL_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  // The contract's own ceiling on a claimBatch slice. The cron reads it rather than
+  // hardcoding 75: winner and loser tickets cost different gas, so the batch size the cron
+  // actually uses is adaptive, and the only fixed number in play must come from the chain.
+  {
+    inputs: [],
+    name: "MAX_CLAIM_BATCH",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
   {
     inputs: [],
     name: "paused",
@@ -71,6 +81,19 @@ export const FARPOT_POOL_ABI = [
   {
     inputs: [{ internalType: "uint256[]", name: "drawingIds", type: "uint256[]" }],
     name: "claim",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  // Permissionless and NOT pausable. The app never calls this — the cron does (Phase 9) —
+  // but it lives here because constants.ts is the single source of truth for the ABI and a
+  // second transcription elsewhere is exactly how an ABI drifts from its contract.
+  {
+    inputs: [
+      { internalType: "uint256", name: "drawingId", type: "uint256" },
+      { internalType: "uint16", name: "count", type: "uint16" },
+    ],
+    name: "claimBatch",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -126,6 +149,19 @@ export const FARPOT_POOL_ABI = [
       { indexed: false, internalType: "uint256", name: "mintedCount", type: "uint256" },
     ],
     name: "Joined",
+    type: "event",
+  },
+  // How the cron reports what a crank actually collected. `potDelta` is the MEASURED USDC
+  // delta for that slice, not a balance read, so it is the only trustworthy figure to log.
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: "uint256", name: "drawingId", type: "uint256" },
+      { indexed: false, internalType: "uint256", name: "count", type: "uint256" },
+      { indexed: false, internalType: "uint256", name: "potDelta", type: "uint256" },
+      { indexed: false, internalType: "uint256", name: "cursor", type: "uint256" },
+    ],
+    name: "BatchClaimed",
     type: "event",
   },
   // --- errors (for decoding reverts into friendly copy) ---

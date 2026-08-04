@@ -62,6 +62,29 @@ const addrsKey = (drawingId: bigint) => `mm:pool:${V}:addrs:${drawingId}`;
 const mineKey = (address: string) => `mm:pool:${V}:mine:${address.toLowerCase()}`;
 const frozenKey = (drawingId: bigint) => `mm:pool:${V}:frozen:${drawingId}`;
 
+// ── cron crank + monitoring state (Phase 9) ────────────────────────────────────────────────
+// Lowest drawing id not yet known to be fully drained. Purely a "where to start looking" hint:
+// losing it costs a bounded re-scan, never correctness, because `poolOf` is authoritative about
+// what still needs claiming.
+const CRANK_CURSOR_KEY = `mm:pool:${V}:crank:cursor`;
+// A drawing whose crank hit a non-resizable revert. Recorded so the daily tick stops retrying
+// it forever, and so it stays visible in the route's response instead of vanishing.
+const haltKey = (drawingId: bigint) => `mm:pool:${V}:crank:halt:${drawingId}`;
+// The set of every halted drawing, kept ALONGSIDE the per-drawing reason.
+//
+// Needed because the crank cursor advances past a halt (a jam must not wall off later
+// drawings), which means the scan window stops covering it — and a drawing nothing inspects is
+// a drawing nothing reports. Without this set a jam would alert exactly once and then go silent
+// forever while real winnings stayed stuck, which is the same shape as the Phase 8 defect where
+// claims quietly stopped being offered.
+const HALT_SET_KEY = `mm:pool:${V}:crank:halted`;
+// Last observed drawing id, for §8.1's "has not advanced" half of the staleness test.
+const STALE_ID_KEY = `mm:pool:${V}:stale:lastid`;
+const alertKey = (kind: string, key: string) => `mm:pool:${V}:alert:${kind}:${key}`;
+
+// Alerts re-fire weekly rather than never: an unfixed jam should resurface, just not daily.
+const ALERT_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 // Long enough to cover a bounded cold scan (many 10k-block chunks against a rate-limited RPC),
 // short enough that a crashed holder frees it reasonably quickly.
 const LOCK_TTL_SECONDS = 120;
@@ -164,6 +187,120 @@ export async function acquireLock(): Promise<string | null> {
   const token = crypto.randomUUID();
   const res = await client().set(LOCK_KEY, token, { nx: true, ex: LOCK_TTL_SECONDS });
   return res === "OK" ? token : null;
+}
+
+/**
+ * Lowest drawing the crank still needs to look at, or null when nothing is recorded.
+ *
+ * Unlike the scan cursor, this one is advisory. The crank re-derives what needs claiming from
+ * `poolOf` every run, so a missing or stale value only widens the window it inspects.
+ */
+export async function getCrankCursor(): Promise<bigint | null> {
+  const raw = await client().get<string | number | null>(CRANK_CURSOR_KEY);
+  if (raw === null || raw === undefined || raw === "") return null;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function setCrankCursor(drawingId: bigint): Promise<void> {
+  await client().set(CRANK_CURSOR_KEY, drawingId.toString());
+}
+
+/**
+ * Record that a drawing's crank failed in a way that must NOT be retried (design §4: "any other
+ * deterministic revert → alert and stop").
+ *
+ * Halts are per-drawing on purpose. A jam is a property of one drawing's ticket list, so
+ * halting the whole cron would let a single stuck drawing block claims for every later one —
+ * which is the same "quietly stops offering money that is still owed" defect Phase 8's second
+ * sweep found in the UI.
+ */
+export interface HaltRecord {
+  kind: "crank-fatal" | "crank-terminal";
+  reason: string;
+}
+
+export async function recordHalt(drawingId: bigint, record: HaltRecord): Promise<void> {
+  await client().set(haltKey(drawingId), JSON.stringify(record));
+  await client().sadd(HALT_SET_KEY, drawingId.toString());
+}
+
+/**
+ * The halt record for a drawing, or null if it is not halted.
+ *
+ * Tolerates the pre-JSON shape (a bare reason string) rather than throwing on it: a cache is not
+ * migratable, and a parse failure here would make a halted drawing read as healthy and get
+ * retried — the one outcome the halt exists to prevent.
+ */
+export async function getHalt(drawingId: bigint): Promise<HaltRecord | null> {
+  // `unknown`, not `string`, because the SDK's automatic deserialization PARSES stored JSON back
+  // into an object on the way out. Typing this as a string does not make it one — it just hides
+  // the object behind a lie, and `JSON.parse` of an object stringifies it to "[object Object]"
+  // and throws, silently downgrading every halt to the legacy shape with a useless reason and
+  // the wrong kind. That wrong kind then defeats alert dedupe and pages daily.
+  const raw = await client().get<unknown>(haltKey(drawingId));
+  if (raw === null || raw === undefined || raw === "") return null;
+
+  const parsed: unknown = typeof raw === "string" ? tryParse(raw) : raw;
+  if (parsed && typeof parsed === "object" && typeof (parsed as HaltRecord).reason === "string") {
+    const record = parsed as Partial<HaltRecord>;
+    return {
+      kind: record.kind === "crank-terminal" ? "crank-terminal" : "crank-fatal",
+      reason: record.reason as string,
+    };
+  }
+  // A bare string is the pre-JSON shape. Keep reading it rather than treating it as absent: a
+  // halt that reads as healthy gets retried, which is the one thing the halt exists to prevent.
+  return { kind: "crank-fatal", reason: String(raw) };
+}
+
+function tryParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Every drawing currently halted, so a jam stays reported after the cursor has moved past it. */
+export async function listHalts(): Promise<bigint[]> {
+  const raw = (await client().smembers<string[]>(HALT_SET_KEY)) ?? [];
+  return raw
+    .map((d) => {
+      try {
+        return BigInt(d);
+      } catch {
+        return null;
+      }
+    })
+    .filter((d): d is bigint => d !== null)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** Last drawing id the monitor saw, for the "has not advanced" half of the §8.1 test. */
+export async function getLastSeenDrawingId(): Promise<bigint | null> {
+  const raw = await client().get<string | number | null>(STALE_ID_KEY);
+  if (raw === null || raw === undefined || raw === "") return null;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function setLastSeenDrawingId(drawingId: bigint): Promise<void> {
+  await client().set(STALE_ID_KEY, drawingId.toString());
+}
+
+export async function alertAlreadySent(kind: string, key: string): Promise<boolean> {
+  return (await client().get<string | null>(alertKey(kind, key))) !== null;
+}
+
+export async function markAlertSent(kind: string, key: string): Promise<void> {
+  await client().set(alertKey(kind, key), String(Date.now()), { ex: ALERT_TTL_SECONDS });
 }
 
 /** Compare-and-delete: releases the lock only if this caller still owns it. */
