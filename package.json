@@ -6,8 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "prepare": "git config core.hooksPath scripts/hooks || true"
+    "lint": "eslint"
   },
   "dependencies": {
     "@coinbase/onchainkit": "^1.1.2",
