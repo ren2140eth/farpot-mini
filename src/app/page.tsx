@@ -2880,17 +2880,17 @@ export default function Home() {
           {/* Join */}
           <div className="rounded-2xl p-5 bg-white/5">
             {poolPaused ? (
-              <p className="text-white/80 text-sm">
+              <p className="pool-dim text-sm">
                 Joining is paused right now. Pools that already bought their tickets are
                 unaffected — claiming always stays open.
               </p>
             ) : drawingState?.jackpotLock ? (
-              <p className="text-white/80 text-sm">
+              <p className="pool-dim text-sm">
                 The draw is about to happen, so joining is closed for a few minutes. It reopens
                 for the next drawing.
               </p>
             ) : poolAtCap ? (
-              <p className="text-white/80 text-sm">
+              <p className="pool-dim text-sm">
                 This draw&rsquo;s pool is full for now — we&rsquo;re keeping pools to a soft cap
                 of ${(Number(POOL_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw while the contract
                 is still being audited. It reopens with the next drawing.
@@ -2923,7 +2923,7 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
-                <p className="text-white/50 text-[11px] mt-2">
+                <p className="pool-dimmer text-[11px] mt-2">
                   Up to {poolMaxThisJoin} per join — join as often as you like.
                 </p>
 
@@ -2978,7 +2978,7 @@ export default function Home() {
                       <p className="text-white font-heading font-bold text-sm">
                         Draw #{p.drawingId.toString()}
                       </p>
-                      <p className="text-white/60 text-xs">
+                      <p className="pool-dimmer text-xs">
                         {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
                       </p>
                     </div>
@@ -2988,12 +2988,12 @@ export default function Home() {
                       switch (row.kind) {
                         case "settling":
                           return (
-                            <span className="text-white/70 text-xs font-heading font-bold">
+                            <span className="pool-dim text-xs font-heading font-bold">
                               Settling…
                             </span>
                           );
                         case "pending":
-                          return <span className="text-white/50 text-xs">—</span>;
+                          return <span className="pool-dimmer text-xs">—</span>;
                         case "claimed":
                           return (
                             <span className="text-wins-green text-xs font-heading font-bold">
@@ -3016,7 +3016,7 @@ export default function Home() {
                           /* Settled with nothing owed: the pool's tickets did not win. Say so
                              plainly rather than showing a $0.00 claim button. */
                           return (
-                            <span className="text-white/50 text-xs font-heading font-bold">
+                            <span className="pool-dimmer text-xs font-heading font-bold">
                               No win this draw
                             </span>
                           );
