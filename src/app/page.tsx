@@ -417,7 +417,9 @@ interface SearchUserResult {
 // resting value is always the real API value — the roll is presentation only.
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-function Odometer({ value }: { value: number }) {
+// `prefix` defaults to "$" so the jackpot call site is unchanged; the Pool tab
+// passes "" because its hero counts tickets, not dollars.
+function Odometer({ value, prefix = "$" }: { value: number; prefix?: string }) {
   // The contract's jackpot-tier payout does not change on every unique ticket
   // purchase, so whole dollars avoid implying false per-ticket precision.
   const str = value.toLocaleString("en-US", {
@@ -431,8 +433,8 @@ function Odometer({ value }: { value: number }) {
     return () => cancelAnimationFrame(id);
   }, []);
   return (
-    <span className="odometer" role="text" aria-label={`$${str}`}>
-      <span aria-hidden="true">$</span>
+    <span className="odometer" role="text" aria-label={`${prefix}${str}`}>
+      {prefix && <span aria-hidden="true">{prefix}</span>}
       {str.split("").map((ch, i) =>
         /\d/.test(ch) ? (
           <span key={`${str.length}-${i}`} className="odo-col" aria-hidden="true">
@@ -997,6 +999,36 @@ export default function Home() {
   // without the frame where an out-of-range number is briefly visible.
   const poolQty = poolMaxThisJoin > 0 ? Math.min(poolQuantity, poolMaxThisJoin) : 0;
   const poolCost = poolTicketPrice * BigInt(poolQty);
+
+  // ── Pool hero, derived at render (no state, nothing to keep in sync) ──
+  // Share is floored to one decimal so it can never round 0.4% up to a whole
+  // percent the contributor does not have; the contract's fullMulDiv floor is
+  // the authority on what they are actually owed.
+  const yourPoolShare =
+    poolTickets > BigInt(0) && yourPoolTickets > BigInt(0)
+      ? `${(Math.floor((Number(yourPoolTickets) * 1000) / Number(poolTickets)) / 10)
+          .toFixed(1)
+          .replace(/\.0$/, "")}%`
+      : "—";
+  const poolStatus = poolPaused
+    ? "PAUSED"
+    : drawingState?.jackpotLock
+      ? "LOCKED"
+      : poolAtCap
+        ? "FULL"
+        : "OPEN";
+  const contributorLine = (() => {
+    const name = (c: PoolContributor) =>
+      c.username ? `@${c.username}` : `${c.address.slice(0, 6)}…${c.address.slice(-4)}`;
+    const n = contributors.length;
+    if (n === 0) return "";
+    if (n === 1) return `${name(contributors[0])} is in`;
+    if (n === 2) return `${name(contributors[0])} and ${name(contributors[1])} are in`;
+    // One name plus a count, not two names: handles run to twenty characters
+    // ("cheddarcole.base.eth"), and two of them wrapped the line onto a second
+    // row next to the face pile.
+    return `${name(contributors[0])} and ${n - 1} others are in`;
+  })();
   const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
 
   // The contributor list is decorative; a failure hides the faces and nothing else.
@@ -2819,43 +2851,66 @@ export default function Home() {
           imply better odds anywhere on this tab. */}
       {activeTab === "pool" && (
         <div className="space-y-6">
-          <div className="rounded-2xl p-5 bg-gradient-to-br from-royal to-royal/80">
-            <h2 className="text-lg font-heading font-extrabold text-white">This draw&rsquo;s pool</h2>
-            <p className="text-white/70 text-xs mt-1">
-              Everyone&rsquo;s tickets ride together. Win or lose, the pot splits by how many
-              tickets you put in — more tickets in play means you share in more of the small
-              wins instead of most draws ending in nothing.
-            </p>
+          {/* Hero, in the Play tab's jackpot-card grammar so the two tabs read as
+              one app: eyebrow, ONE big gold number, a live pill, a stat row. The
+              old flat royal slab opened with a three-line paragraph, which put the
+              least interesting thing first. */}
+          <div className="jackpot-card rounded-3xl p-6 space-y-5">
+            <div className="text-center">
+              <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
+                This draw&rsquo;s pool
+              </p>
 
-            <div className="grid grid-cols-3 gap-3 mt-4">
-              <div>
-                <p className="text-white/60 text-[11px] font-heading font-bold tracking-wide">TICKETS</p>
-                <p className="text-white font-heading font-extrabold text-xl">{poolTickets.toString()}</p>
-              </div>
-              <div>
-                <p className="text-white/60 text-[11px] font-heading font-bold tracking-wide">PLAYERS</p>
-                <p className="text-white font-heading font-extrabold text-xl">{poolContributorCount.toString()}</p>
-              </div>
-              <div>
-                <p className="text-white/60 text-[11px] font-heading font-bold tracking-wide">YOURS</p>
-                <p className="text-white font-heading font-extrabold text-xl">{yourPoolTickets.toString()}</p>
-              </div>
+              {/* An empty pool is the COMMON case at soft-launch size, and a giant
+                  gold 0 reads worse than no hero at all — so empty gets its own
+                  line and the pill/faces below simply do not render. */}
+              {poolTickets > BigInt(0) ? (
+                <>
+                  <p className="jackpot-headline display gold-text pulse-gold text-6xl mt-2 tabular-nums">
+                    <Odometer value={Number(poolTickets)} prefix="" />
+                  </p>
+                  <p className="text-mut text-[11px] font-heading font-bold uppercase tracking-[0.18em] mt-1">
+                    {poolTickets === BigInt(1) ? "ticket in the pot" : "tickets in the pot"}
+                  </p>
+                </>
+              ) : (
+                <p className="display gold-text text-4xl mt-3">Be first in</p>
+              )}
+
+              {poolContributorCount > BigInt(0) && (
+                <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-royal/25 bg-royal/10 px-3 py-1.5 text-xs font-semibold text-mut">
+                  <span className="h-1.5 w-1.5 rounded-full bg-wins-green" />
+                  <span className="font-bold text-cream tabular-nums">
+                    {poolContributorCount.toString()}
+                  </span>{" "}
+                  {poolContributorCount === BigInt(1) ? "player in" : "players in"}
+                </p>
+              )}
             </div>
 
             {/* Faces of everyone in. Hidden entirely when the log route is
-                degraded — numbers above still come from the contract, so the
-                tab stays useful and never shows a partial or wrong list. */}
-            {!contributorsDegraded && contributors.length > 0 && (
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                {contributors.slice(0, 12).map((c) => (
-                  <span key={c.address} className="flex items-center gap-1.5 bg-white/10 rounded-full pl-1 pr-2.5 py-1">
-                    {c.pfp ? (
+                degraded — the numbers above still come from the contract, so the
+                tab stays useful and never shows a partial or wrong list.
+                Stacked, not side by side: a 20-character ENS handle
+                ("@cheddarcole.base.eth and 6 others are in") wrapped onto a
+                second line next to the pile and looked broken. Centred under the
+                faces it has the full card width and reads as deliberate even
+                when it does wrap.
+                Gated on poolTickets too, so the "Be first in" hero can never sit
+                above a pile of faces: poolOf reads at latest while the log route
+                lags two confirmations, so the two feeds disagree transiently. */}
+            {poolTickets > BigInt(0) && !contributorsDegraded && contributors.length > 0 && (
+              <div className="flex flex-col items-center gap-2">
+                <div className="flex -space-x-2">
+                  {contributors.slice(0, 5).map((c) => (
+                    c.pfp ? (
                       <Image
+                        key={c.address}
                         src={c.pfp}
                         alt=""
-                        width={20}
-                        height={20}
-                        className="rounded-full"
+                        width={28}
+                        height={28}
+                        className="pool-face rounded-full"
                         unoptimized
                         /* visibility, never display: collapsing the box would
                            reflow the row on every failed avatar. */
@@ -2864,25 +2919,51 @@ export default function Home() {
                         }}
                       />
                     ) : (
-                      <span className="w-5 h-5 rounded-full bg-white/20" />
-                    )}
-                    <span className="text-white text-[11px] font-heading font-bold">
-                      {c.username ? `@${c.username}` : `${c.address.slice(0, 6)}…${c.address.slice(-4)}`}
-                    </span>
-                    <span className="text-white/50 text-[11px]">{c.tickets}</span>
-                  </span>
-                ))}
-                {contributors.length > 12 && (
-                  <span className="text-white/60 text-[11px] font-heading font-bold">
-                    +{contributors.length - 12} more
-                  </span>
-                )}
+                      <span key={c.address} className="pool-face w-7 h-7 rounded-full" />
+                    )
+                  ))}
+                </div>
+                <p className="pool-dimmer text-xs text-center">{contributorLine}</p>
               </div>
             )}
+
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <p className="text-mut text-[10px] uppercase tracking-wider">Yours</p>
+                <p className="text-cream font-heading font-extrabold text-lg tabular-nums">
+                  {yourPoolTickets.toString()}
+                </p>
+              </div>
+              <div>
+                {/* "Share", not "Your share": the longer label wrapped to two
+                    lines at 320 and pushed this column's value out of line with
+                    the other two. */}
+                <p className="text-mut text-[10px] uppercase tracking-wider">Share</p>
+                <p className="text-cream font-heading font-extrabold text-lg tabular-nums">
+                  {yourPoolShare}
+                </p>
+              </div>
+              <div>
+                <p className="text-mut text-[10px] uppercase tracking-wider">Status</p>
+                <p
+                  className={`font-heading font-extrabold text-lg ${
+                    poolStatus === "OPEN" ? "text-wins-green" : "text-win"
+                  }`}
+                >
+                  {poolStatus}
+                </p>
+              </div>
+            </div>
+
+            {/* Copy rule: variance reduction and social play, never better odds. */}
+            <p className="text-mut text-xs text-center">
+              Everyone&rsquo;s tickets ride together — the pot splits by how many you put in.
+            </p>
           </div>
 
-          {/* Join */}
-          <div className="rounded-2xl p-5 bg-white/5">
+          {/* Join — the same surface as the Play tab's ticket panel, so the
+              action reads as a real card and not an untreated box. */}
+          <div className="play-ticket-panel">
             {poolPaused ? (
               <p className="pool-dim text-sm">
                 Joining is paused right now. Pools that already bought their tickets are
@@ -2935,10 +3016,14 @@ export default function Home() {
                   <button
                     onClick={handleJoin}
                     disabled={joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)}
-                    className="w-full mt-4 py-3 rounded-xl bg-gold text-navy font-heading font-extrabold disabled:opacity-50"
+                    className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
+                      joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)
+                        ? "bg-white/5 text-mut cursor-not-allowed"
+                        : "btn-gold"
+                    } ${joinPhase === "approving" || joinPhase === "buying" ? "animate-pulse" : ""}`}
                   >
                     {joinPhase === "approving"
-                      ? "Approving…"
+                      ? "Approving USDC…"
                       : joinPhase === "buying"
                         ? "Joining…"
                         : `Join with ${poolQty} ticket${poolQty === 1 ? "" : "s"} · $${formatUnits(poolCost, USDC_DECIMALS)}`}

@@ -578,6 +578,16 @@ body {
 .pool-dim { color: rgba(52, 32, 79, 0.82); }
 .pool-dimmer { color: rgba(52, 32, 79, 0.66); }
 
+/* Overlapping contributor avatars. The ring has to match the CARD, not the
+   page, or the pile looks cut out against the surface it sits on. */
+.pool-face {
+  width: 28px;
+  height: 28px;
+  border: 2px solid #fff;
+  background: #eef1f7;
+  object-fit: cover;
+}
+
 /* ── Ball pop: springy select feedback in the number picker ───────── */
 @keyframes ball-pop {
   0% { transform: scale(0.7); }
@@ -714,6 +724,7 @@ body {
 [data-theme="midnight"] .app-shell .text-white { color: #fff; }
 [data-theme="midnight"] .app-shell .pool-dim { color: rgba(255, 255, 255, .8); }
 [data-theme="midnight"] .app-shell .pool-dimmer { color: rgba(255, 255, 255, .55); }
+[data-theme="midnight"] .app-shell .pool-face { border-color: #241542; background: rgba(255, 255, 255, .14); }
 [data-theme="midnight"] .app-shell [class~="bg-white/5"] { background-color: rgba(255, 255, 255, .05); }
 [data-theme="midnight"] .app-shell [class~="bg-white/10"] { background-color: rgba(255, 255, 255, .1); }
 [data-theme="midnight"] .app-shell [class~="border-white/5"],
