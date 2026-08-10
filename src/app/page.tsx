@@ -481,11 +481,15 @@ function Logo({ scale = 1, theme = "light" }: { scale?: number; theme?: Theme })
 // ── Bottom tab navigation (floating pill) ────────────────────────
 // Brief item 4b: green badge dot on Results when claimable winnings exist
 function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey; onTabChange: (tab: TabKey) => void; hasClaimable?: boolean }) {
+  // Full-bleed wrapper with its own gutters, NOT left-1/2 + -translate-x-1/2:
+  // the pill is content-sized, so a centred transform kept it 390.9px wide on
+  // every screen and hung it 35px off BOTH edges at 320px. Centring inside an
+  // inset-x-0 flex row lets it shrink instead.
   return (
-    <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-50" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+    <div className="fixed bottom-3 inset-x-0 z-50 flex justify-center px-3" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
       {/* Surface styling lives in .nav-pill, not utilities, so the theme can
           own it — a bg-white/95 utility here beats any [data-theme] rule. */}
-      <nav className="nav-pill flex items-center gap-1 px-3 py-2 rounded-full backdrop-blur-md">
+      <nav className="nav-pill flex items-center gap-1 px-2 py-2 rounded-full backdrop-blur-md w-full max-w-[420px]">
         {[
           {
             key: 'play' as TabKey,
@@ -538,14 +542,14 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
           <button
             key={key}
             onClick={() => onTabChange(key)}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-full transition-colors relative ${
+            className={`flex flex-auto min-w-0 items-center justify-center gap-1 px-1 py-2 rounded-full transition-colors relative ${
               activeTab === key
                 ? 'bg-royal/10 text-royal'
                 : 'text-mut/70 hover:text-navy hover:bg-slate-100'
             }`}
           >
-            <span>{icon}</span>
-            <span className="text-[12px] font-heading font-bold tracking-wide">{label}</span>
+            <span className="shrink-0">{icon}</span>
+            <span className="text-[12px] font-heading font-bold tracking-wide truncate">{label}</span>
             {key === 'results' && hasClaimable && (
               <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-wins-green" />
             )}
