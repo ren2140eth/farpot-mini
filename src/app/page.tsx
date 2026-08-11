@@ -37,6 +37,7 @@ import {
 } from "@/lib/constants";
 import { confirmTransaction } from "@/lib/transaction-receipt";
 import { poolJoinLimits } from "@/lib/pool-cap";
+import { bufferGas } from "@/lib/gas-buffer";
 import { poolHistoryRange, poolRowState } from "@/lib/pool-history";
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -1076,11 +1077,25 @@ export default function Home() {
         if (approveReceipt.status === "reverted") throw new Error("Approval transaction reverted");
       }
       setJoinPhase("buying");
+      // join() routes through Megapot's buyTickets, the same heavy call the solo path
+      // already buffers. Sending the bare estimate is what failed tx 0x5f0d…a7b9: it
+      // consumed its whole limit and reverted. See gas-buffer.ts.
+      const joinCalldata = encodeFunctionData({
+        abi: FARPOT_POOL_ABI,
+        functionName: "join",
+        args: [poolQty],
+      });
+      const joinEstimate = await estimateGas(config, {
+        account: address,
+        to: FARPOT_POOL_ADDRESS,
+        data: joinCalldata,
+      });
       const hash = await writeContract(config, {
         address: FARPOT_POOL_ADDRESS,
         abi: FARPOT_POOL_ABI,
         functionName: "join",
         args: [poolQty],
+        gas: bufferGas(joinEstimate),
       });
       const receipt = await confirmTransaction(config, hash);
       if (receipt.status === "reverted") throw new Error("Join reverted");
@@ -1203,11 +1218,24 @@ export default function Home() {
       setClaimingDrawing(drawingId);
       haptics.impact();
       try {
+        // Lighter than join (no Megapot buy), but it is still the path that moves a
+        // contributor's winnings, and padding is close to free — gas is billed on use.
+        const claimCalldata = encodeFunctionData({
+          abi: FARPOT_POOL_ABI,
+          functionName: "claim",
+          args: [[drawingId]],
+        });
+        const claimEstimate = await estimateGas(config, {
+          account: address,
+          to: FARPOT_POOL_ADDRESS,
+          data: claimCalldata,
+        });
         const hash = await writeContract(config, {
           address: FARPOT_POOL_ADDRESS,
           abi: FARPOT_POOL_ABI,
           functionName: "claim",
           args: [[drawingId]],
+          gas: bufferGas(claimEstimate),
         });
         const receipt = await confirmTransaction(config, hash);
         if (receipt.status === "reverted") throw new Error("Claim reverted");
@@ -1433,9 +1461,7 @@ export default function Home() {
         to: buyTarget,
         data: buyCalldata,
       });
-      // 1.5× buffer — pure BigInt math. (A non-integer reaching BigInt() throws
-      // RangeError, which would crash the buy before it ever reaches the wallet.)
-      const bufferedGas = (estimatedGas * BigInt(3)) / BigInt(2);
+      const bufferedGas = bufferGas(estimatedGas);
 
       // Snapshot the buyer's latest indexed ticket BEFORE minting, so afterward we
       // can tell a freshly-indexed ticket apart from a stale one and never reveal
