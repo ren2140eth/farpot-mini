@@ -6,13 +6,22 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "forge:build": "scripts/forge.sh build",
+    "forge:test": "scripts/forge.sh test",
+    "forge:fork": "FORK=1 scripts/forge.sh test --match-path \"test/*.fork.t.sol\"",
+    "forge:gas": "scripts/forge.sh test --gas-report",
+    "check:addresses": "node scripts/check-addresses.mjs",
+    "forge:deploy:simulate": "FORK=1 scripts/forge.sh script script/DeployFarpotPool.s.sol --rpc-url \"$BASE_RPC_URL\" --sender \"${POOL_DEPLOYER:-$POOL_OWNER}\"",
+    "forge:fmt": "scripts/forge.sh fmt",
+    "forge:fmt:check": "scripts/forge.sh fmt --check"
   },
   "dependencies": {
     "@coinbase/onchainkit": "^1.1.2",
     "@farcaster/miniapp-node": "^0.2.0",
     "@farcaster/miniapp-sdk": "^0.2.3",
     "@tanstack/react-query": "^5.101.0",
+    "@upstash/redis": "^1.38.1",
     "@vercel/analytics": "^2.0.1",
     "next": "16.2.9",
     "react": "19.2.4",

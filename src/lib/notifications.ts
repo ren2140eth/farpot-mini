@@ -3,9 +3,12 @@
 //
 // Storage: Upstash Redis (REST) when UPSTASH_REDIS_REST_URL / _TOKEN are set;
 // otherwise every call is a logged no-op so dev/build never crashes.
-//   TODO: provision Upstash (Vercel Marketplace → Upstash Redis) and set the
-//   two env vars in Vercel. Or swap this module for Vercel KV — the public
-//   functions below are the only contract the routes depend on.
+//   Upstash IS provisioned (Vercel Marketplace → "upstash-kv-citron-engine"), and
+//   KV_REST_API_URL / KV_REST_API_TOKEN are set for Production and Preview. The old
+//   TODO here outlived the work and wrongly implied the store was unavailable — it
+//   was taken at face value once and led to a wrong statement about prod. Note that
+//   the credentials are marked SENSITIVE in Vercel, so `vercel env pull` returns
+//   [SENSITIVE] and they cannot be exercised from a local machine.
 //
 // Farcaster notification spec (verified against
 // https://miniapps.farcaster.xyz/docs/guides/notifications):

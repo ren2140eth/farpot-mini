@@ -1,0 +1,91 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+
+# Pinned to match the verified Megapot contracts on Base — Jackpot, JackpotTicketNFT and
+# JackpotRandomTicketBuyer are all solc 0.8.28 — so our interfaces cannot drift from theirs
+# on a compiler difference.
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+# Compiler metadata is deliberately RETAINED (both `bytecode_hash` and `cbor_metadata` left
+# at their defaults). An earlier draft stripped both and called it "auditable" — that was
+# backwards. The embedded metadata hash is what lets Sourcify report an exact/full match and
+# lets a reviewer bind deployed bytecode to the exact compiler settings and sources; stripping
+# it caps us at a partial match. Every Megapot contract read during design verified as
+# `exact_match` on Sourcify, and we want the same standing for a contract holding user funds.
+# We have no need for reproducible bytecode (no CREATE2 vanity address, no build attestation),
+# so there is nothing to trade for it.
+
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "solady/=lib/solady/src/",
+]
+
+[profile.default.fuzz]
+runs = 512
+
+[profile.default.invariant]
+# DEPTH IS THE LOAD-BEARING KNOB HERE, not runs. Foundry resets state between invariant runs,
+# so a single run must be long enough to walk a whole pool lifecycle — join, mark winners,
+# roll over, drain the cursor, claim — and to do it for TWO drawings so the cross-pot solvency
+# property (I7) is actually exercised. At the previous depth of 64, split across 5 handler
+# functions, a run managed ~13 calls each and never got there; the coverage floor caught it.
+runs = 128
+depth = 256
+# Tolerated only while there are no handlers. A permissive setting here can hide a harness
+# that spends most of its calls reverting instead of exploring state, so Phase 3 must bound
+# handler inputs, assert a minimum successful-call count, and flip the CI profile below to
+# `fail_on_revert = true` once expected-invalid calls are explicit.
+fail_on_revert = false
+
+# Heavier fuzzing for the accounting invariants (I1-I10) — the properties that five design
+# review rounds could not check by inspection.
+[profile.ci.fuzz]
+runs = 5000
+
+[profile.ci.invariant]
+runs = 500
+depth = 256
+# Phase 3 flipped this, as planned: `FarpotPoolHandler` now bounds every input AND pre-checks
+# every precondition, returning early instead of calling into a revert. So under CI a revert
+# is no longer an expected outcome — it is a harness bug or a real defect, and either should
+# stop the build.
+#
+# EXPECTED RED until Phase 4 lands the contract: the skeleton reverts `Unimplemented()` on
+# every call, which is the entire point of writing the suite first. The coverage floor in
+# `afterInvariant` fails for the same reason. Both go green when the bodies are written.
+fail_on_revert = true
+# Print the per-function call distribution. A collapse in coverage then shows up in the log
+# rather than only as a pass/fail bit — the failure mode `fail_on_revert = false` is famous
+# for hiding, and which the default profile below still permits for local iteration.
+show_metrics = true
+
+[rpc_endpoints]
+base = "${BASE_RPC_URL}"
+
+# There is deliberately NO [etherscan] section.
+#
+# It used to read `base = { key = "${BASESCAN_API_KEY}", chain = 8453 }`, and it broke source
+# verification outright: foundry resolves that env var eagerly, so with BASESCAN_API_KEY unset
+# `forge script --verify --verifier sourcify` failed with "environment variable
+# `BASESCAN_API_KEY` not found" AFTER the contract had already been deployed — and setting the
+# variable to a dummy made foundry announce "ETHERSCAN_API_KEY is set, defaulting to Etherscan
+# verifier" and ignore `--verifier sourcify` entirely. Either way Sourcify was unreachable.
+#
+# Verification therefore runs on Sourcify, which needs no API key:
+#
+#     forge verify-contract <address> src/FarpotPool.sol:FarpotPool \
+#       --chain-id 8453 --verifier sourcify
+#
+# Confirm the result reports `"match": "exact_match"` (Sourcify's current name for a full
+# match) rather than a partial one — retaining compiler metadata in this file is what earns it.
+# If Basescan verification is ever wanted, pass `--etherscan-api-key` on the command line
+# instead of reinstating this section.
+
+

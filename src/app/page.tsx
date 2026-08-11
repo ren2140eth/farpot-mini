@@ -11,7 +11,7 @@ import {
 } from "react";
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
-import { useAccount, useConfig, useDisconnect, useReadContract } from "wagmi";
+import { useAccount, useConfig, useDisconnect, useReadContract, useReadContracts } from "wagmi";
 import { estimateGas, readContract, writeContract } from "wagmi/actions";
 import { stringToHex, formatUnits, encodeFunctionData } from "viem";
 import { ConnectWallet } from "@coinbase/onchainkit/wallet";
@@ -28,8 +28,16 @@ import {
   USDC_ABI,
   REFERRAL_WALLET,
   MEGAPOT_API_BASE,
+  FARPOT_POOL_ADDRESS,
+  FARPOT_POOL_ABI,
+  POOL_STATE,
+  POOL_SOFT_CAP_USDC,
+  POOL_FIRST_DRAWING,
+  POOL_HISTORY_LOOKBACK,
 } from "@/lib/constants";
 import { confirmTransaction } from "@/lib/transaction-receipt";
+import { poolJoinLimits } from "@/lib/pool-cap";
+import { poolHistoryRange, poolRowState } from "@/lib/pool-history";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -57,7 +65,7 @@ interface TicketSelection {
 }
 
 type BuyPhase = "idle" | "approving" | "buying" | "success" | "error";
-type TabKey = "play" | "gift" | "results";
+type TabKey = "play" | "pool" | "gift" | "results";
 type QtyPreset = "1" | "2" | "5" | "10" | "custom";
 
 function ConfettiBurst() {
@@ -390,6 +398,14 @@ function GiftReader({ onGift }: { onGift: (gift: GiftState) => void }) {
 
 // ── Gift user search state (plain gift entry) ──────────────────────
 
+interface PoolContributor {
+  address: string;
+  /** Decimal string: this wallet's ticket weight, read from contract state. */
+  tickets: string;
+  username: string | null;
+  pfp: string | null;
+}
+
 interface SearchUserResult {
   fid: number;
   username: string;
@@ -401,7 +417,9 @@ interface SearchUserResult {
 // resting value is always the real API value — the roll is presentation only.
 const ODO_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-function Odometer({ value }: { value: number }) {
+// `prefix` defaults to "$" so the jackpot call site is unchanged; the Pool tab
+// passes "" because its hero counts tickets, not dollars.
+function Odometer({ value, prefix = "$" }: { value: number; prefix?: string }) {
   // The contract's jackpot-tier payout does not change on every unique ticket
   // purchase, so whole dollars avoid implying false per-ticket precision.
   const str = value.toLocaleString("en-US", {
@@ -415,8 +433,8 @@ function Odometer({ value }: { value: number }) {
     return () => cancelAnimationFrame(id);
   }, []);
   return (
-    <span className="odometer" role="text" aria-label={`$${str}`}>
-      <span aria-hidden="true">$</span>
+    <span className="odometer" role="text" aria-label={`${prefix}${str}`}>
+      {prefix && <span aria-hidden="true">{prefix}</span>}
       {str.split("").map((ch, i) =>
         /\d/.test(ch) ? (
           <span key={`${str.length}-${i}`} className="odo-col" aria-hidden="true">
@@ -465,11 +483,15 @@ function Logo({ scale = 1, theme = "light" }: { scale?: number; theme?: Theme })
 // ── Bottom tab navigation (floating pill) ────────────────────────
 // Brief item 4b: green badge dot on Results when claimable winnings exist
 function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey; onTabChange: (tab: TabKey) => void; hasClaimable?: boolean }) {
+  // Full-bleed wrapper with its own gutters, NOT left-1/2 + -translate-x-1/2:
+  // the pill is content-sized, so a centred transform kept it 390.9px wide on
+  // every screen and hung it 35px off BOTH edges at 320px. Centring inside an
+  // inset-x-0 flex row lets it shrink instead.
   return (
-    <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-50" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+    <div className="fixed bottom-3 inset-x-0 z-50 flex justify-center px-3" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
       {/* Surface styling lives in .nav-pill, not utilities, so the theme can
           own it — a bg-white/95 utility here beats any [data-theme] rule. */}
-      <nav className="nav-pill flex items-center gap-1 px-3 py-2 rounded-full backdrop-blur-md">
+      <nav className="nav-pill flex items-center gap-1 px-2 py-2 rounded-full backdrop-blur-md w-full max-w-[420px]">
         {[
           {
             key: 'play' as TabKey,
@@ -497,6 +519,17 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
             label: 'Gift',
           },
           {
+            key: 'pool' as TabKey,
+            icon: (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="9" cy="9" r="3.25" />
+                <circle cx="15.5" cy="9" r="3.25" />
+                <circle cx="12.25" cy="15" r="3.25" />
+              </svg>
+            ),
+            label: 'Pool',
+          },
+          {
             key: 'results' as TabKey,
             icon: (
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -511,14 +544,14 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
           <button
             key={key}
             onClick={() => onTabChange(key)}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-full transition-colors relative ${
+            className={`flex flex-auto min-w-0 items-center justify-center gap-1 px-1 py-2 rounded-full transition-colors relative ${
               activeTab === key
                 ? 'bg-royal/10 text-royal'
                 : 'text-mut/70 hover:text-navy hover:bg-slate-100'
             }`}
           >
-            <span>{icon}</span>
-            <span className="text-[12px] font-heading font-bold tracking-wide">{label}</span>
+            <span className="shrink-0">{icon}</span>
+            <span className="text-[12px] font-heading font-bold tracking-wide truncate">{label}</span>
             {key === 'results' && hasClaimable && (
               <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-wins-green" />
             )}
@@ -888,6 +921,326 @@ export default function Home() {
 
   // ── Share-to-cast ────────────────────────────────────────────────
   const { composeCast } = useComposeCast();
+
+  // ── Pool (group buy) ──────────────────────────────────────────────
+  // Every number shown on this tab comes from the CONTRACT. The /api/pool
+  // route supplies only the list of addresses, so if it fails the tab keeps
+  // working and simply hides the faces — it can never show a wrong list.
+  const [poolQuantity, setPoolQuantity] = useState(1);
+  const [joinPhase, setJoinPhase] = useState<BuyPhase>("idle");
+  const [joinError, setJoinError] = useState("");
+  const [poolRefresh, setPoolRefresh] = useState(0);
+  const [contributors, setContributors] = useState<PoolContributor[]>([]);
+  const [contributorsDegraded, setContributorsDegraded] = useState(false);
+  const [yourPoolDrawings, setYourPoolDrawings] = useState<bigint[]>([]);
+  const [poolClaimError, setPoolClaimError] = useState("");
+  const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
+
+  const poolArgs = currentDrawingId !== undefined ? ([currentDrawingId] as const) : undefined;
+
+  const { data: poolData, refetch: refetchPool } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "poolOf",
+    args: poolArgs,
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
+  });
+
+  const { data: shareData, refetch: refetchShare } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "shareOf",
+    args: currentDrawingId !== undefined && address ? [currentDrawingId, address] : undefined,
+    query: { enabled: currentDrawingId !== undefined && !!address, refetchInterval: 60_000 },
+  });
+
+  // Read the cap from the contract rather than hardcoding it, so the UI and the
+  // constant can never diverge.
+  const { data: maxTicketsPerJoin } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "MAX_TICKETS_PER_JOIN",
+  });
+
+  const { data: poolPaused } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "paused",
+    query: { refetchInterval: 60_000 },
+  });
+
+  const { data: poolAllowance, refetch: refetchPoolAllowance } = useReadContract({
+    address: USDC_ADDRESS,
+    abi: USDC_ABI,
+    functionName: "allowance",
+    args: address ? [address, FARPOT_POOL_ADDRESS] : undefined,
+    query: { enabled: !!address },
+  });
+
+  const poolTickets = poolData?.[0] ?? BigInt(0);
+  const poolContributorCount = poolData?.[1] ?? BigInt(0);
+  const poolState = poolData?.[3] ?? POOL_STATE.None;
+  const yourPoolTickets = shareData?.[0] ?? BigInt(0);
+
+  // Soft cap, converted through the LIVE ticket price — never a hardcoded $1,
+  // because the price is a chain value. The arithmetic lives in pool-cap.ts so
+  // its boundaries are testable against the same code this renders from.
+  const poolTicketPrice = drawingState?.ticketPrice ?? BigInt(0);
+  const contractCap = maxTicketsPerJoin ?? BigInt(0);
+  const { maxThisJoin: poolMaxThisJoin, atCap: poolAtCap } = poolJoinLimits({
+    poolTickets,
+    ticketPrice: poolTicketPrice,
+    contractCap,
+    softCapUsdc: POOL_SOFT_CAP_USDC,
+  });
+  // Derived, not clamped into state by an effect. The pool fills underneath the
+  // user while this tab is open, so the maximum moves; deriving it every render
+  // keeps the displayed quantity in range without a setState-in-effect, and
+  // without the frame where an out-of-range number is briefly visible.
+  const poolQty = poolMaxThisJoin > 0 ? Math.min(poolQuantity, poolMaxThisJoin) : 0;
+  const poolCost = poolTicketPrice * BigInt(poolQty);
+
+  // ── Pool hero, derived at render (no state, nothing to keep in sync) ──
+  // Share is floored to one decimal so it can never round 0.4% up to a whole
+  // percent the contributor does not have; the contract's fullMulDiv floor is
+  // the authority on what they are actually owed.
+  const yourPoolShare =
+    poolTickets > BigInt(0) && yourPoolTickets > BigInt(0)
+      ? `${(Math.floor((Number(yourPoolTickets) * 1000) / Number(poolTickets)) / 10)
+          .toFixed(1)
+          .replace(/\.0$/, "")}%`
+      : "—";
+  const poolStatus = poolPaused
+    ? "PAUSED"
+    : drawingState?.jackpotLock
+      ? "LOCKED"
+      : poolAtCap
+        ? "FULL"
+        : "OPEN";
+  const contributorLine = (() => {
+    const name = (c: PoolContributor) =>
+      c.username ? `@${c.username}` : `${c.address.slice(0, 6)}…${c.address.slice(-4)}`;
+    const n = contributors.length;
+    if (n === 0) return "";
+    if (n === 1) return `${name(contributors[0])} is in`;
+    if (n === 2) return `${name(contributors[0])} and ${name(contributors[1])} are in`;
+    // One name plus a count, not two names: handles run to twenty characters
+    // ("cheddarcole.base.eth"), and two of them wrapped the line onto a second
+    // row next to the face pile.
+    return `${name(contributors[0])} and ${n - 1} others are in`;
+  })();
+  const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
+
+  // The contributor list is decorative; a failure hides the faces and nothing else.
+  useEffect(() => {
+    if (activeTab !== "pool" || currentDrawingId === undefined) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/pool/contributors?drawingId=${currentDrawingId}${address ? `&address=${address}` : ""}`,
+        );
+        const body = await res.json();
+        if (cancelled) return;
+        setContributors(body.contributors ?? []);
+        setContributorsDegraded(Boolean(body.degraded));
+        setYourPoolDrawings(
+          ((body.yourDrawings ?? []) as string[]).map((d) => BigInt(d)),
+        );
+      } catch {
+        if (cancelled) return;
+        setContributors([]);
+        setContributorsDegraded(true);
+        setYourPoolDrawings([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, currentDrawingId, address, poolRefresh]);
+
+  const handleJoin = useCallback(async () => {
+    if (!address || poolQty < 1) return;
+    setJoinError("");
+    haptics.impact();
+    try {
+      if (poolNeedsApproval) {
+        setJoinPhase("approving");
+        const approveHash = await writeContract(config, {
+          address: USDC_ADDRESS,
+          abi: USDC_ABI,
+          functionName: "approve",
+          args: [FARPOT_POOL_ADDRESS, poolCost],
+        });
+        const approveReceipt = await confirmTransaction(config, approveHash);
+        if (approveReceipt.status === "reverted") throw new Error("Approval transaction reverted");
+      }
+      setJoinPhase("buying");
+      const hash = await writeContract(config, {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "join",
+        args: [poolQty],
+      });
+      const receipt = await confirmTransaction(config, hash);
+      if (receipt.status === "reverted") throw new Error("Join reverted");
+      setJoinPhase("success");
+      haptics.success();
+      refetchPool();
+      refetchShare();
+      refetchPoolAllowance();
+      refetchUsdcBalance();
+      // Re-pull the contributor list so the joiner sees themselves immediately.
+      setPoolRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setJoinPhase("error");
+      haptics.error();
+      // PoolLocked clears by itself; Paused does not. Distinguishing them is the
+      // whole reason the custom errors are in the ABI.
+      if (/user rejected|user denied|rejected the request/i.test(raw)) {
+        setJoinError("Join cancelled.");
+      } else if (/PoolLocked/i.test(raw)) {
+        setJoinError("The draw is about to happen — joining reopens for the next drawing.");
+      } else if (/Paused/i.test(raw)) {
+        setJoinError("Joining is paused right now. Existing pools are unaffected.");
+      } else if (/InvalidTicketCount/i.test(raw)) {
+        setJoinError(`You can join with up to ${contractCap} tickets at a time.`);
+      } else if (/transfer amount exceeds balance|insufficient/i.test(raw)) {
+        setJoinError("Not enough USDC for that many tickets.");
+      } else {
+        setJoinError("Couldn't complete the join — try again, or try fewer tickets.");
+      }
+    }
+  }, [
+    address,
+    config,
+    contractCap,
+    poolCost,
+    poolNeedsApproval,
+    poolQty,
+    refetchPool,
+    refetchPoolAllowance,
+    refetchShare,
+    refetchUsdcBalance,
+  ]);
+
+  // ── Past pools: the claim path ────────────────────────────────────
+  //
+  // `poolOf`/`shareOf` above are read for the CURRENT drawing only, which can never be
+  // Claimable or Settled — those states exist exclusively for drawings that have rolled over.
+  // Without this block the Claimable/Settled UI is unreachable and a contributor loses all
+  // access to their winnings the moment the drawing ends. (It was, and they did.)
+  // The wallet's FULL history from the log index (no expiry — claim() has no deadline on
+  // chain, so the UI must not invent one), unioned with a bounded recent window. The window is
+  // the fallback: if the log route is unavailable the user still sees and can claim recent
+  // pools, rather than losing the claim path entirely whenever the index is down.
+  const pastDrawingIds = useMemo(() => {
+    if (currentDrawingId === undefined) return [];
+    const recent = poolHistoryRange({
+      currentDrawingId,
+      firstDrawing: POOL_FIRST_DRAWING,
+      lookback: POOL_HISTORY_LOOKBACK,
+    });
+    const seen = new Set(recent.map((d) => d.toString()));
+    const older = yourPoolDrawings.filter(
+      (d) => d < currentDrawingId && !seen.has(d.toString()),
+    );
+    // Newest first across both sources.
+    return [...recent, ...older].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
+  }, [currentDrawingId, yourPoolDrawings]);
+
+  // Two entries per drawing, one multicall. `shareOf` carries the user's weight, what they are
+  // owed and whether they already claimed; `poolStateOf` gates whether the figure may be shown
+  // at all.
+  const { data: pastPoolReads, refetch: refetchPastPools } = useReadContracts({
+    contracts: pastDrawingIds.flatMap((d) => [
+      {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "shareOf" as const,
+        args: [d, address as `0x${string}`] as const,
+      },
+      {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "poolStateOf" as const,
+        args: [d] as const,
+      },
+    ]),
+    query: {
+      enabled: activeTab === "pool" && !!address && pastDrawingIds.length > 0,
+      refetchInterval: 60_000,
+    },
+  });
+
+  const myPastPools = useMemo(() => {
+    if (!pastPoolReads) return [];
+    const out: {
+      drawingId: bigint;
+      tickets: bigint;
+      owed: bigint;
+      hasClaimed: boolean;
+      state: number;
+    }[] = [];
+    pastDrawingIds.forEach((drawingId, i) => {
+      const share = pastPoolReads[i * 2];
+      const state = pastPoolReads[i * 2 + 1];
+      // A failed read is skipped rather than rendered as a zero — showing "you won $0" because
+      // an RPC call failed is worse than showing nothing.
+      if (share?.status !== "success" || state?.status !== "success") return;
+      const [tickets, owed, hasClaimed] = share.result as readonly [bigint, bigint, boolean];
+      if (tickets === BigInt(0)) return; // never joined this drawing
+      out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
+    });
+    return out;
+  }, [pastPoolReads, pastDrawingIds]);
+
+  const handleClaimPool = useCallback(
+    async (drawingId: bigint) => {
+      if (!address) return;
+      setPoolClaimError("");
+      setClaimingDrawing(drawingId);
+      haptics.impact();
+      try {
+        const hash = await writeContract(config, {
+          address: FARPOT_POOL_ADDRESS,
+          abi: FARPOT_POOL_ABI,
+          functionName: "claim",
+          args: [[drawingId]],
+        });
+        const receipt = await confirmTransaction(config, hash);
+        if (receipt.status === "reverted") throw new Error("Claim reverted");
+        haptics.success();
+        refetchPastPools();
+        refetchUsdcBalance();
+      } catch (err: unknown) {
+        const raw = err instanceof Error ? err.message : String(err);
+        haptics.error();
+        setPoolClaimError(
+          /user rejected|user denied|rejected the request/i.test(raw)
+            ? "Claim cancelled."
+            : /NotSettled/i.test(raw)
+              ? "This pool is still settling — try again shortly."
+              : "Couldn't confirm the claim. If your USDC balance went up it went through.",
+        );
+      } finally {
+        setClaimingDrawing(null);
+      }
+    },
+    [address, config, refetchPastPools, refetchUsdcBalance],
+  );
+
+  const handleSharePool = useCallback(() => {
+    const count = Number(poolTickets);
+    composeCast({
+      text:
+        `I'm in the Farpot group pool for this draw — ${count} ticket${count === 1 ? "" : "s"} in so far.` +
+        ` More tickets, more chances to hit something together 🎰`,
+      embeds: [APP_URL],
+    });
+  }, [composeCast, poolTickets]);
+
 
   const handleShare = useCallback(() => {
     if (!drawingState) return;
@@ -2488,6 +2841,283 @@ export default function Home() {
           </button>
 
         </>
+      )}
+
+      {/* ── POOL TAB ─────────────────────────────────────────────── */}
+
+      {/* Copy rule (non-negotiable): pooling is variance reduction and social
+          play. It does NOT improve expected value — 50 people pooling have the
+          same EV as 50 buying alone, just smaller and more frequent wins. Never
+          imply better odds anywhere on this tab. */}
+      {activeTab === "pool" && (
+        <div className="space-y-6">
+          {/* Hero, in the Play tab's jackpot-card grammar so the two tabs read as
+              one app: eyebrow, ONE big gold number, a live pill, a stat row. The
+              old flat royal slab opened with a three-line paragraph, which put the
+              least interesting thing first. */}
+          <div className="jackpot-card rounded-3xl p-6 space-y-5">
+            <div className="text-center">
+              <p className="text-royal text-xs font-heading font-bold uppercase tracking-[0.22em]">
+                This draw&rsquo;s pool
+              </p>
+
+              {/* An empty pool is the COMMON case at soft-launch size, and a giant
+                  gold 0 reads worse than no hero at all — so empty gets its own
+                  line and the pill/faces below simply do not render. */}
+              {poolTickets > BigInt(0) ? (
+                <>
+                  <p className="jackpot-headline display gold-text pulse-gold text-6xl mt-2 tabular-nums">
+                    <Odometer value={Number(poolTickets)} prefix="" />
+                  </p>
+                  <p className="text-mut text-[11px] font-heading font-bold uppercase tracking-[0.18em] mt-1">
+                    {poolTickets === BigInt(1) ? "ticket in the pot" : "tickets in the pot"}
+                  </p>
+                </>
+              ) : (
+                <p className="display gold-text text-4xl mt-3">Be first in</p>
+              )}
+
+              {poolContributorCount > BigInt(0) && (
+                <p className="mt-3 inline-flex items-center gap-2 rounded-full border border-royal/25 bg-royal/10 px-3 py-1.5 text-xs font-semibold text-mut">
+                  <span className="h-1.5 w-1.5 rounded-full bg-wins-green" />
+                  <span className="font-bold text-cream tabular-nums">
+                    {poolContributorCount.toString()}
+                  </span>{" "}
+                  {poolContributorCount === BigInt(1) ? "player in" : "players in"}
+                </p>
+              )}
+            </div>
+
+            {/* Faces of everyone in. Hidden entirely when the log route is
+                degraded — the numbers above still come from the contract, so the
+                tab stays useful and never shows a partial or wrong list.
+                Stacked, not side by side: a 20-character ENS handle
+                ("@cheddarcole.base.eth and 6 others are in") wrapped onto a
+                second line next to the pile and looked broken. Centred under the
+                faces it has the full card width and reads as deliberate even
+                when it does wrap.
+                Gated on poolTickets too, so the "Be first in" hero can never sit
+                above a pile of faces: poolOf reads at latest while the log route
+                lags two confirmations, so the two feeds disagree transiently. */}
+            {poolTickets > BigInt(0) && !contributorsDegraded && contributors.length > 0 && (
+              <div className="flex flex-col items-center gap-2">
+                <div className="flex -space-x-2">
+                  {contributors.slice(0, 5).map((c) => (
+                    c.pfp ? (
+                      <Image
+                        key={c.address}
+                        src={c.pfp}
+                        alt=""
+                        width={28}
+                        height={28}
+                        className="pool-face rounded-full"
+                        unoptimized
+                        /* visibility, never display: collapsing the box would
+                           reflow the row on every failed avatar. */
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
+                        }}
+                      />
+                    ) : (
+                      <span key={c.address} className="pool-face w-7 h-7 rounded-full" />
+                    )
+                  ))}
+                </div>
+                <p className="pool-dimmer text-xs text-center">{contributorLine}</p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <p className="text-mut text-[10px] uppercase tracking-wider">Yours</p>
+                <p className="text-cream font-heading font-extrabold text-lg tabular-nums">
+                  {yourPoolTickets.toString()}
+                </p>
+              </div>
+              <div>
+                {/* "Share", not "Your share": the longer label wrapped to two
+                    lines at 320 and pushed this column's value out of line with
+                    the other two. */}
+                <p className="text-mut text-[10px] uppercase tracking-wider">Share</p>
+                <p className="text-cream font-heading font-extrabold text-lg tabular-nums">
+                  {yourPoolShare}
+                </p>
+              </div>
+              <div>
+                <p className="text-mut text-[10px] uppercase tracking-wider">Status</p>
+                <p
+                  className={`font-heading font-extrabold text-lg ${
+                    poolStatus === "OPEN" ? "text-wins-green" : "text-win"
+                  }`}
+                >
+                  {poolStatus}
+                </p>
+              </div>
+            </div>
+
+            {/* Copy rule: variance reduction and social play, never better odds. */}
+            <p className="text-mut text-xs text-center">
+              Everyone&rsquo;s tickets ride together — the pot splits by how many you put in.
+            </p>
+          </div>
+
+          {/* Join — the same surface as the Play tab's ticket panel, so the
+              action reads as a real card and not an untreated box. */}
+          <div className="play-ticket-panel">
+            {poolPaused ? (
+              <p className="pool-dim text-sm">
+                Joining is paused right now. Pools that already bought their tickets are
+                unaffected — claiming always stays open.
+              </p>
+            ) : drawingState?.jackpotLock ? (
+              <p className="pool-dim text-sm">
+                The draw is about to happen, so joining is closed for a few minutes. It reopens
+                for the next drawing.
+              </p>
+            ) : poolAtCap ? (
+              <p className="pool-dim text-sm">
+                This draw&rsquo;s pool is full for now — we&rsquo;re keeping pools to a soft cap
+                of ${(Number(POOL_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw while the contract
+                is still being audited. It reopens with the next drawing.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-white font-heading font-bold text-sm">Tickets to add</span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setPoolQuantity(Math.max(1, poolQty - 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      −
+                    </button>
+                    <span className="text-white font-heading font-extrabold w-8 text-center">
+                      {poolQty}
+                    </span>
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setPoolQuantity(Math.min(poolMaxThisJoin, poolQty + 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <p className="pool-dimmer text-[11px] mt-2">
+                  Up to {poolMaxThisJoin} per join — join as often as you like.
+                </p>
+
+                {isConnected ? (
+                  <button
+                    onClick={handleJoin}
+                    disabled={joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)}
+                    className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
+                      joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)
+                        ? "bg-white/5 text-mut cursor-not-allowed"
+                        : "btn-gold"
+                    } ${joinPhase === "approving" || joinPhase === "buying" ? "animate-pulse" : ""}`}
+                  >
+                    {joinPhase === "approving"
+                      ? "Approving USDC…"
+                      : joinPhase === "buying"
+                        ? "Joining…"
+                        : `Join with ${poolQty} ticket${poolQty === 1 ? "" : "s"} · $${formatUnits(poolCost, USDC_DECIMALS)}`}
+                  </button>
+                ) : (
+                  <div className="mt-4">
+                    <ConnectWallet />
+                  </div>
+                )}
+
+                {joinPhase === "success" && (
+                  <div className="mt-3">
+                    <p className="text-wins-green text-sm font-heading font-bold">You&rsquo;re in 🎰</p>
+                    <button
+                      onClick={handleSharePool}
+                      className="mt-2 text-gold text-xs font-heading font-bold underline"
+                    >
+                      Share on Farcaster
+                    </button>
+                  </div>
+                )}
+                {joinError && <p className="text-coral text-sm mt-3">{joinError}</p>}
+              </>
+            )}
+          </div>
+
+          {/* Your past pools — the claim path.
+              A Claimable pool must NOT show a payout figure: shareOf reports only the pot
+              collected so far while claimBatch is still draining, so a number here would be
+              wrong and would then change under the user. Only Settled is final. */}
+          {isConnected && myPastPools.length > 0 && (
+            <div>
+              <h3 className="text-white font-heading font-extrabold text-sm mb-2">Your past pools</h3>
+              <div className="space-y-2">
+                {myPastPools.map((p) => (
+                  <div
+                    key={p.drawingId.toString()}
+                    className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <p className="text-white font-heading font-bold text-sm">
+                        Draw #{p.drawingId.toString()}
+                      </p>
+                      <p className="pool-dimmer text-xs">
+                        {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
+                      </p>
+                    </div>
+
+                    {(() => {
+                      const row = poolRowState(p);
+                      switch (row.kind) {
+                        case "settling":
+                          return (
+                            <span className="pool-dim text-xs font-heading font-bold">
+                              Settling…
+                            </span>
+                          );
+                        case "pending":
+                          return <span className="pool-dimmer text-xs">—</span>;
+                        case "claimed":
+                          return (
+                            <span className="text-wins-green text-xs font-heading font-bold">
+                              ✓ claimed
+                            </span>
+                          );
+                        case "claimable":
+                          return (
+                            <button
+                              onClick={() => handleClaimPool(p.drawingId)}
+                              disabled={claimingDrawing === p.drawingId}
+                              className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
+                            >
+                              {claimingDrawing === p.drawingId
+                                ? "Claiming…"
+                                : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
+                            </button>
+                          );
+                        default:
+                          /* Settled with nothing owed: the pool's tickets did not win. Say so
+                             plainly rather than showing a $0.00 claim button. */
+                          return (
+                            <span className="pool-dimmer text-xs font-heading font-bold">
+                              No win this draw
+                            </span>
+                          );
+                      }
+                    })()}
+                  </div>
+                ))}
+              </div>
+              {poolClaimError && <p className="text-coral text-sm mt-2">{poolClaimError}</p>}
+            </div>
+          )}
+        </div>
       )}
 
       {/* ── RESULTS TAB ──────────────────────────────────────────── */}
