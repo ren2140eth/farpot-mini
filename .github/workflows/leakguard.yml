@@ -1,0 +1,75 @@
+name: leakguard
+
+# Server-side backstop. Client-side git hooks cannot see PR titles/bodies,
+# and can be bypassed; this cannot. The pattern lives in a repo secret so
+# this file never spells out the terms it matches.
+on:
+  push:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check pattern is configured
+        env:
+          PAT: ${{ secrets.LEAKGUARD_PATTERN }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::error::LEAKGUARD_PATTERN secret is not set - refusing to pass blind."
+            exit 1
+          fi
+
+      - name: Scan commit messages
+        env:
+          PAT: ${{ secrets.LEAKGUARD_PATTERN }}
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            range="origin/${BASE}..HEAD"
+          elif [ -n "${BEFORE:-}" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            range="${BEFORE}..HEAD"
+          else
+            range="HEAD"
+          fi
+          hits="$(git log --format='%H %s%n%b' $range | grep -inE "$PAT" || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::personal/internal term found in commit message(s)"
+            printf '%s\n' "$hits" | cut -c1-160
+            exit 1
+          fi
+
+      - name: Scan tree
+        env:
+          PAT: ${{ secrets.LEAKGUARD_PATTERN }}
+        run: |
+          set -uo pipefail
+          hits="$(git grep -I -n -iE "$PAT" HEAD -- ':!package-lock.json' ':!pnpm-lock.yaml' ':!yarn.lock' || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::personal/internal term found in tracked files"
+            printf '%s\n' "$hits" | cut -c1-160
+            exit 1
+          fi
+
+      - name: Scan PR title and body
+        if: github.event_name == 'pull_request'
+        env:
+          PAT: ${{ secrets.LEAKGUARD_PATTERN }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -uo pipefail
+          hits="$(printf '%s\n%s\n' "$TITLE" "$BODY" | grep -inE "$PAT" || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::personal/internal term in PR title or body"
+            printf '%s\n' "$hits" | cut -c1-160
+            exit 1
+          fi
