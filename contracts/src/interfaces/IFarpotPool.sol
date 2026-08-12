@@ -210,6 +210,9 @@ interface IFarpotPool {
     ///         one state, and no value can go stale because nothing is stored.
     function poolStateOf(uint256 drawingId) external view returns (PoolState);
 
+    /// @dev `tickets` (field 1) is **joiner weight only**; `ticketCount` (field 6) is **every
+    ///      ticket the pool owns**, sponsored included. Consumers that walk tickets to claim
+    ///      want field 6; consumers that reason about payout weight want field 1.
     function poolOf(uint256 drawingId)
         external
         view
@@ -228,6 +231,8 @@ interface IFarpotPool {
     ///         floor entitlement once `Settled`; zero again once claimed. The UI must show a
     ///         payout figure ONLY when `poolStateOf == Settled`.
     /// @return hasClaimed Whether this contributor has already taken their share.
+    /// @dev `hasClaimed` is shared with `sponsorShareOf` — the two claimant classes are
+    ///      mutually exclusive per drawing.
     function shareOf(uint256 drawingId, address who)
         external
         view
@@ -235,6 +240,15 @@ interface IFarpotPool {
 
     /// @notice Sponsored totals for `drawingId`, in one read.
     function sponsorsOf(uint256 drawingId) external view returns (uint256 tickets, uint256 sponsors);
+
+    /// @notice A sponsor's position in `drawingId`.
+    /// @dev `owed` is non-zero ONLY when the drawing ended with no joiner weight at all — the
+    ///      zero-joiner fallback. `hasClaimed` is the SAME flag `shareOf` reports: the two
+    ///      claimant classes are mutually exclusive per drawing, so one flag serves both.
+    function sponsorShareOf(uint256 drawingId, address who)
+        external
+        view
+        returns (uint256 tickets, uint256 owed, bool hasClaimed);
 
     /*//////////////////////////////////////////////////////////////
                                   OWNER

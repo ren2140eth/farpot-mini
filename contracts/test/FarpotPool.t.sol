@@ -247,6 +247,69 @@ contract FarpotPoolSponsorTest is PoolTestBase {
         emit IFarpotPool.Sponsored(d, alice, 4);
         _sponsor(alice, 4);
     }
+
+    function test_fallback_sponsorOnlyPoolPaysSponsors() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 3);
+        _sponsor(bob, 1);
+
+        uint256 staked = _makeWinners(d, 4, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        vm.prank(alice);
+        pool.claim(ds);
+        vm.prank(bob);
+        pool.claim(ds);
+
+        // 3:1 by sponsored weight.
+        assertEq(usdc.balanceOf(alice) - aliceBefore, (staked * 3) / 4, "alice's sponsored share");
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked / 4, "bob's sponsored share");
+    }
+
+    function test_fallback_disappearsWhenAJoinerArrives() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 9);
+        _join(bob, 1); // arrives after the sponsor, before lock
+
+        uint256 staked = _makeWinners(d, 10, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 0, "one joiner removes the fallback entirely");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked, "the joiner takes all of it");
+    }
+
+    function test_sponsorShareOf_reportsZeroWhenJoinersExist() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 5);
+
+        // While the drawing is sponsor-only, alice is nominally owed the pot...
+        (uint256 t1,, bool c1) = pool.sponsorShareOf(d, alice);
+        assertEq(t1, 5);
+        assertFalse(c1);
+
+        // ...and the moment a joiner exists, she is owed nothing.
+        _join(bob, 1);
+        _makeWinners(d, 6, 100e6);
+        _rollover();
+        _drainCursor(d);
+        (, uint256 owed2,) = pool.sponsorShareOf(d, alice);
+        assertEq(owed2, 0, "sponsors are owed zero whenever joiners exist");
+    }
 }
 
 /*//////////////////////////////////////////////////////////////////////////////
@@ -928,6 +991,26 @@ contract FarpotPoolClaimTest is PoolTestBase {
 
     function naiveShare(uint256 potAmount, uint256 w, uint256 total) external pure returns (uint256) {
         return potAmount * w / total;
+    }
+
+    function test_claim_withNoWeightDoesNotBurnTheClaimedFlag() public {
+        uint256 d = jackpot.currentDrawingId();
+        _join(bob, 1);
+        _makeWinners(d, 1, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        // A stranger with no weight claims first. This must be a no-op, NOT a flag burn.
+        vm.prank(outsider);
+        pool.claim(ds);
+        assertFalse(pool.claimed(d, outsider), "a no-weight claim must not set claimed");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(bob) - bobBefore, 100e6, "the real claimant is unaffected");
     }
 }
 

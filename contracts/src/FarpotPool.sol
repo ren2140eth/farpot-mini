@@ -287,7 +287,21 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
 
             // Duplicate ids in one call are a no-op after the first, not a double payout.
             if (claimed[d][msg.sender]) continue;
-            uint256 w = ticketsByUser[d][msg.sender];
+
+            // Class selection, and the ONLY place the fallback exists. A drawing with no
+            // joiner weight would otherwise have an undistributable pot: its sponsors get
+            // their own tickets' winnings back, split by sponsored weight. The gift returns
+            // only if nobody took it.
+            uint256 total = totalTickets[d];
+            uint256 w;
+            uint256 denom;
+            if (total == 0) {
+                w = sponsoredByUser[d][msg.sender];
+                denom = totalSponsored[d];
+            } else {
+                w = ticketsByUser[d][msg.sender];
+                denom = total;
+            }
             if (w == 0) continue;
 
             // The weight is NEVER zeroed, so historical participation stays readable from
@@ -295,8 +309,9 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
             claimed[d][msg.sender] = true;
 
             // Floor, via the full 512-bit product: the naive `pot * w / total` reverts on
-            // overflow, which would strand a pot permanently.
-            uint256 amount = FixedPointMathLib.fullMulDiv(pot[d], w, totalTickets[d]);
+            // overflow, which would strand a pot permanently. `denom` cannot be zero here —
+            // `w != 0` implies its own class total is non-zero.
+            uint256 amount = FixedPointMathLib.fullMulDiv(pot[d], w, denom);
             owed += amount;
 
             emit Claimed(d, msg.sender, amount);
@@ -370,6 +385,23 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         // Guarded so a drawing with no participants returns 0 rather than dividing by zero.
         if (!hasClaimed && total != 0) {
             owed = FixedPointMathLib.fullMulDiv(pot[drawingId], tickets, total);
+        }
+    }
+
+    /// @inheritdoc IFarpotPool
+    function sponsorShareOf(uint256 drawingId, address who)
+        external
+        view
+        override
+        returns (uint256 tickets, uint256 owed, bool hasClaimed)
+    {
+        tickets = sponsoredByUser[drawingId][who];
+        hasClaimed = claimed[drawingId][who];
+
+        // Non-zero ONLY in the fallback: any joiner weight at all means sponsors are owed zero.
+        uint256 sponsored = totalSponsored[drawingId];
+        if (!hasClaimed && totalTickets[drawingId] == 0 && sponsored != 0) {
+            owed = FixedPointMathLib.fullMulDiv(pot[drawingId], tickets, sponsored);
         }
     }
 
