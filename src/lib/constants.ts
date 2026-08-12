@@ -85,6 +85,15 @@ export const FARPOT_POOL_ABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
+  // Buys tickets the pool owns and claims itself — credited to sponsoredByUser/totalSponsored/
+  // sponsorCount, NEVER to totalTickets. Sponsors take no payout weight; see sponsorShareOf.
+  {
+    inputs: [{ internalType: "uint32", name: "tickets", type: "uint32" }],
+    name: "sponsor",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
   // Permissionless and NOT pausable. The app never calls this — the cron does (Phase 9) —
   // but it lives here because constants.ts is the single source of truth for the ABI and a
   // second transcription elsewhere is exactly how an ABI drifts from its contract.
@@ -137,6 +146,49 @@ export const FARPOT_POOL_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [{ internalType: "uint256", name: "drawingId", type: "uint256" }],
+    name: "totalSponsored",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { internalType: "uint256", name: "drawingId", type: "uint256" },
+      { internalType: "address", name: "who", type: "address" },
+    ],
+    name: "sponsoredByUser",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "drawingId", type: "uint256" }],
+    name: "sponsorsOf",
+    outputs: [
+      { internalType: "uint256", name: "tickets", type: "uint256" },
+      { internalType: "uint256", name: "sponsors", type: "uint256" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  // `owed` is non-zero ONLY when totalTickets[drawingId] === 0 — the zero-joiner fallback that
+  // pays sponsors instead. hasClaimed is shared with shareOf's claimant class.
+  {
+    inputs: [
+      { internalType: "uint256", name: "drawingId", type: "uint256" },
+      { internalType: "address", name: "who", type: "address" },
+    ],
+    name: "sponsorShareOf",
+    outputs: [
+      { internalType: "uint256", name: "tickets", type: "uint256" },
+      { internalType: "uint256", name: "owed", type: "uint256" },
+      { internalType: "bool", name: "hasClaimed", type: "bool" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
   // --- events ---
   // Both drawingId and contributor are indexed, so the contributor route filters the current
   // drawing by topic instead of scanning history.
@@ -162,6 +214,17 @@ export const FARPOT_POOL_ABI = [
       { indexed: false, internalType: "uint256", name: "cursor", type: "uint256" },
     ],
     name: "BatchClaimed",
+    type: "event",
+  },
+  // A sponsor bought tickets FOR the pool, taking no payout weight for them.
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: "uint256", name: "drawingId", type: "uint256" },
+      { indexed: true, internalType: "address", name: "sponsor", type: "address" },
+      { indexed: false, internalType: "uint256", name: "tickets", type: "uint256" },
+    ],
+    name: "Sponsored",
     type: "event",
   },
   // --- errors (for decoding reverts into friendly copy) ---
@@ -205,6 +268,21 @@ export const POOL_HISTORY_LOOKBACK = 45;
 // therefore never promise a hard limit. It exists to bound the routine case until the audit,
 // and is expressed in USDC rather than tickets so it converts through the LIVE ticket price.
 export const POOL_SOFT_CAP_USDC = BigInt(500_000_000);
+
+// Soft-launch cap on SPONSORED value per drawing, in USDC (6 decimals) — $500.
+//
+// Deliberately a SEPARATE bucket from POOL_SOFT_CAP_USDC rather than a shared one: sharing
+// would mean a sponsorship crowds out the joiners it exists to attract. Worst case per drawing
+// is therefore $1000 across both. Joiner principal at risk is unchanged; the extra exposure is
+// the sponsor's own money plus the joiners' winnings from it.
+export const POOL_SPONSOR_SOFT_CAP_USDC = BigInt(500_000_000);
+
+// Minimum sponsored value to be billed in the pool hero — $10.
+//
+// "Largest sponsor wins" sets only a RELATIVE price: in an otherwise unsponsored drawing a
+// single $1 ticket would buy the banner. Anyone may still sponsor below this and is still
+// counted in the totals; they just do not get the headline. Display policy, not fund safety.
+export const POOL_SPONSOR_BILLING_MIN_USDC = BigInt(10_000_000);
 
 // Base chain ID
 export const BASE_CHAIN_ID = 8453;

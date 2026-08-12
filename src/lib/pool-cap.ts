@@ -39,3 +39,29 @@ export function poolJoinLimits(params: {
   const maxThisJoin = Number(headroomTickets < contractCap ? headroomTickets : contractCap);
   return { poolValueUsdc, headroomUsdc, maxThisJoin, atCap: maxThisJoin <= 0 };
 }
+
+/**
+ * How many tickets a wallet may SPONSOR in one transaction.
+ *
+ * Identical shape to `poolJoinLimits`, against a separate budget: sponsored value has its own
+ * soft cap so a sponsorship cannot consume the joiners' headroom. Same two limits, smaller
+ * wins, same advisory-only caveat — `sponsor()` is callable directly and the contract has no
+ * total cap.
+ */
+export function poolSponsorLimits(params: {
+  /** Tickets already sponsored for this drawing, from `sponsorsOf`. */
+  sponsoredTickets: bigint;
+  ticketPrice: bigint;
+  contractCap: bigint;
+  softCapUsdc: bigint;
+}): { sponsoredValueUsdc: bigint; headroomUsdc: bigint; maxThisSponsor: number; atCap: boolean } {
+  const { sponsoredTickets, ticketPrice, contractCap, softCapUsdc } = params;
+
+  const sponsoredValueUsdc = sponsoredTickets * ticketPrice;
+  const headroomUsdc =
+    sponsoredValueUsdc >= softCapUsdc ? BigInt(0) : softCapUsdc - sponsoredValueUsdc;
+  const headroomTickets = ticketPrice > BigInt(0) ? headroomUsdc / ticketPrice : BigInt(0);
+
+  const maxThisSponsor = Number(headroomTickets < contractCap ? headroomTickets : contractCap);
+  return { sponsoredValueUsdc, headroomUsdc, maxThisSponsor, atCap: maxThisSponsor <= 0 };
+}
