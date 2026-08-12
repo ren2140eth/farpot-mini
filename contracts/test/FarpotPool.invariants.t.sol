@@ -39,6 +39,8 @@ contract FarpotPoolInvariantsTest is Test {
         jackpot.setAuthorizedMinter(address(rtb), true);
 
         pool = new FarpotPool(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
+        // The pool deploys paused (see FarpotPool's constructor); the fuzzer exercises the live pool.
+        pool.unpause();
         usdc.mint(address(jackpot), 100_000_000e6); // deep enough to pay any fuzzed win
 
         handler = new FarpotPoolHandler(pool, jackpot, nft, rtb, usdc);

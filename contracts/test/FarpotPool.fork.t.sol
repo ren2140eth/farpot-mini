@@ -54,6 +54,8 @@ contract FarpotPoolForkTest is Test {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), blockNumber);
         alice = makeAddr("alice");
         pool = new FarpotPool(JACKPOT, RTB, NFT, USDC, REFERRAL);
+        // The pool deploys paused (see FarpotPool's constructor); fork tests exercise the live pool.
+        pool.unpause();
         deal(USDC, alice, 10_000e6);
         vm.prank(alice);
         IERC20Fork(USDC).approve(address(pool), type(uint256).max);

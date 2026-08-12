@@ -1212,6 +1212,24 @@ contract FarpotPoolConstructorTest is PoolTestBase {
         vm.expectRevert(IFarpotPool.InconsistentDeps.selector);
         _deploy(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
     }
+
+    function test_deploysPaused_andJoinRevertsUntilUnpaused() public {
+        FarpotPool fresh = new FarpotPool(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
+        assertTrue(fresh.paused(), "a fresh pool must deploy paused");
+
+        vm.prank(alice);
+        usdc.approve(address(fresh), type(uint256).max);
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.Paused.selector);
+        fresh.join(1);
+
+        fresh.unpause();
+        assertFalse(fresh.paused());
+        vm.prank(alice);
+        fresh.join(1);
+        (uint256 tickets,,,,,) = fresh.poolOf(jackpot.currentDrawingId());
+        assertEq(tickets, 1, "join must work once unpaused");
+    }
 }
 
 /*//////////////////////////////////////////////////////////////////////////////

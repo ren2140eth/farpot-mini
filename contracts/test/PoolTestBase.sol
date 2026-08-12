@@ -49,6 +49,8 @@ abstract contract PoolTestBase is Test {
         jackpot.setAuthorizedMinter(address(rtb), true);
 
         pool = new FarpotPool(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
+        // The pool deploys paused (see FarpotPool's constructor); tests exercise the live pool.
+        pool.unpause();
 
         _fund(alice);
         _fund(bob);

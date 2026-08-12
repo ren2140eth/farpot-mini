@@ -115,6 +115,12 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         usdc = _usdc;
         referralWallet = _ref;
 
+        // Deployed PAUSED, deliberately. A live-on-deploy pool can accumulate a rival pool for
+        // the current drawing during a migration, before the old pool is paused and the
+        // frontend switched — two contributor sets, two pots and two crank obligations for one
+        // drawing. `pause()` never blocks claims, so this cannot strand anything.
+        paused = true;
+
         _initializeOwner(msg.sender);
     }
 
