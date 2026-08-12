@@ -139,6 +139,40 @@ contract FarpotPoolForkTest is Test {
         assertEq(IERC20Fork(USDC).balanceOf(address(pool)), 0, "no idle contribution held");
     }
 
+    /*//////////////////////////////////////////////////////////////
+                              REAL SPONSOR
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev `sponsor` shares `_buyAndRecord` with `join`, so this is the same real-buyer
+    ///      integration proof, checked against the class split that makes sponsorship
+    ///      different: no joiner weight, but still a real minted, pool-owned ticket.
+    function test_fork_realSponsor_recordsRealTicketsWithNoWeight() public {
+        _forkAt(BLOCK_OPEN);
+
+        vm.recordLogs();
+        vm.prank(alice);
+        pool.sponsor(3);
+        uint256[] memory ids = _mintedIds();
+
+        assertEq(ids.length, 3, "three tickets minted to the pool on-chain");
+
+        for (uint256 i; i < ids.length; ++i) {
+            assertEq(IJackpotTicketNFT(NFT).ownerOf(ids[i]), address(pool), "pool owns it");
+            assertEq(
+                IJackpotTicketNFT(NFT).getTicketInfo(ids[i]).drawingId,
+                DRAWING_OPEN,
+                "derived drawing matches the ticket's own binding"
+            );
+        }
+
+        (uint256 totalTickets,,,,, uint256 ticketCount) = pool.poolOf(DRAWING_OPEN);
+        (uint256 totalSponsored,) = pool.sponsorsOf(DRAWING_OPEN);
+
+        assertEq(totalSponsored, 3, "sponsor accounting moved");
+        assertEq(totalTickets, 0, "sponsored tickets must not move joiner weight");
+        assertEq(ticketCount, totalTickets + totalSponsored, "ticket list covers both classes");
+    }
+
     /// @dev The near-draw boundary. Unreachable without pinning a block where the real
     ///      contract has already locked.
     function test_fork_joinWhileJackpotLocked_revertsPoolLocked() public {

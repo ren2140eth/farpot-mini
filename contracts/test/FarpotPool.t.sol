@@ -766,6 +766,37 @@ contract FarpotPoolClaimBatchTest is PoolTestBase {
         (,,,, uint256 cursor,) = pool.poolOf(D0);
         assertEq(cursor, 1, "claimBatch is never blocked by pause");
     }
+
+    /// @dev Measures crank cost for a heavily sponsored drawing. Not a correctness assertion so
+    ///      much as a budget check: the number printed here is what the keeper pays to drain a
+    ///      drawing at the intended exposure ceiling.
+    function test_load_heavilySponsoredDrawingDrains() public {
+        uint256 d = jackpot.currentDrawingId();
+        uint32 cap = _cap();
+        // 500 tickets = the $500 sponsor soft cap at $1/ticket.
+        for (uint256 i; i < 50; ++i) {
+            _sponsor(alice, cap);
+        }
+        (uint256 sponsored,) = pool.sponsorsOf(d);
+        assertEq(sponsored, 500);
+
+        _rollover();
+
+        uint256 batches;
+        uint256 gasUsed;
+        uint16 batch = uint16(pool.MAX_CLAIM_BATCH());
+        while (true) {
+            (,,,, uint256 cursor, uint256 count) = pool.poolOf(d);
+            if (cursor >= count) break;
+            uint256 before = gasleft();
+            pool.claimBatch(d, batch);
+            gasUsed += before - gasleft();
+            ++batches;
+        }
+        emit log_named_uint("claimBatch transactions to drain 500 tickets", batches);
+        emit log_named_uint("total gas", gasUsed);
+        assertEq(batches, 7, "500 tickets / 75 per batch");
+    }
 }
 
 /*//////////////////////////////////////////////////////////////////////////////
