@@ -305,6 +305,30 @@ contract FarpotPoolSponsorTest is PoolTestBase {
         assertEq(usdc.balanceOf(bob) - bobBefore, staked, "the joiner takes all of it");
     }
 
+    /// @dev PINS A DELIBERATE PROPERTY, NOT A BUG. A sponsor who ALSO joins collects a joiner
+    ///      share of the whole pot, sponsored winnings included. It cannot be fixed in the
+    ///      contract — barring sponsors from joining is one extra address away from meaningless —
+    ///      so the UI copy must say "sponsored tickets pay out to everyone else", never "the
+    ///      sponsor gets nothing". If this test ever fails, the copy rule changed with it.
+    function test_sponsorWhoAlsoJoins_collectsAJoinerShare() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 9);
+        _join(alice, 1); // the only joiner
+
+        uint256 staked = _makeWinners(d, 10, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256 before = usdc.balanceOf(alice);
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        vm.prank(alice);
+        pool.claim(ds);
+
+        assertEq(usdc.balanceOf(alice) - before, staked, "the sole joiner takes 100%, sponsor or not");
+        assertEq(pool.sponsoredByUser(d, alice), 9, "and is still credited as a sponsor");
+    }
+
     function test_sponsorShareOf_reportsZeroWhenJoinersExist() public {
         uint256 d = jackpot.currentDrawingId();
         _sponsor(alice, 5);
@@ -680,6 +704,47 @@ contract FarpotPoolClaimBatchTest is PoolTestBase {
             pool.contributorCount(D0) + pool.contributorCount(d1),
             "dust bounded by contributors across both drawings"
         );
+    }
+
+    /// @dev The two-coexisting-pots solvency scenario, with one pot on the SPONSOR fallback path.
+    ///      I7's per-class walk is new code; this proves it against a second simultaneous pot
+    ///      rather than trusting the fuzzer to build the combination.
+    function test_solvency_sponsorOnlyPotCoexistsWithAJoinerPot() public {
+        uint256 d1 = jackpot.currentDrawingId();
+        _sponsor(alice, 4); // sponsor-only drawing
+        uint256 staked1 = _makeWinners(d1, 4, 100e6);
+        _rollover();
+
+        uint256 d2 = jackpot.currentDrawingId();
+        _join(bob, 2); // ordinary joiner drawing
+        uint256 staked2 = _makeWinners(d2, 2, 100e6);
+        _rollover();
+
+        _drainCursor(d1);
+        _drainCursor(d2);
+
+        // Both pots are unclaimed at once and share ONE balance.
+        assertEq(pool.pot(d1), staked1);
+        assertEq(pool.pot(d2), staked2);
+        assertGe(usdc.balanceOf(address(pool)), staked1 + staked2, "one balance must cover both pots");
+
+        (, uint256 aliceOwed,) = pool.sponsorShareOf(d1, alice);
+        (, uint256 bobOwed,) = pool.shareOf(d2, bob);
+        assertEq(aliceOwed, staked1);
+        assertEq(bobOwed, staked2);
+
+        uint256[] memory ds = new uint256[](2);
+        ds[0] = d1;
+        ds[1] = d2;
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, staked1, "alice takes only her sponsor pot");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked2, "bob takes only his joiner pot");
     }
 
     function test_claimBatch_emitsBatchClaimed() public {
