@@ -32,11 +32,12 @@ import {
   FARPOT_POOL_ABI,
   POOL_STATE,
   POOL_SOFT_CAP_USDC,
+  POOL_SPONSOR_SOFT_CAP_USDC,
   POOL_FIRST_DRAWING,
   POOL_HISTORY_LOOKBACK,
 } from "@/lib/constants";
 import { confirmTransaction } from "@/lib/transaction-receipt";
-import { poolJoinLimits } from "@/lib/pool-cap";
+import { poolJoinLimits, poolSponsorLimits } from "@/lib/pool-cap";
 import { bufferGas } from "@/lib/gas-buffer";
 import { poolHistoryRange, poolRowState } from "@/lib/pool-history";
 
@@ -930,6 +931,9 @@ export default function Home() {
   const [poolQuantity, setPoolQuantity] = useState(1);
   const [joinPhase, setJoinPhase] = useState<BuyPhase>("idle");
   const [joinError, setJoinError] = useState("");
+  const [sponsorQuantity, setSponsorQuantity] = useState(1);
+  const [sponsorPhase, setSponsorPhase] = useState<BuyPhase>("idle");
+  const [sponsorError, setSponsorError] = useState("");
   const [poolRefresh, setPoolRefresh] = useState(0);
   const [contributors, setContributors] = useState<PoolContributor[]>([]);
   const [contributorsDegraded, setContributorsDegraded] = useState(false);
@@ -953,6 +957,17 @@ export default function Home() {
     functionName: "shareOf",
     args: currentDrawingId !== undefined && address ? [currentDrawingId, address] : undefined,
     query: { enabled: currentDrawingId !== undefined && !!address, refetchInterval: 60_000 },
+  });
+
+  // Same shape as poolOf — the pool-wide totals of tickets bought FOR the pool by sponsors.
+  // Kept alongside poolOf's read so the two can never drift apart on screen; every place that
+  // refetches poolOf also refetches this.
+  const { data: sponsorsData, refetch: refetchSponsors } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "sponsorsOf",
+    args: poolArgs,
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
   });
 
   // Read the cap from the contract rather than hardcoding it, so the UI and the
@@ -982,6 +997,8 @@ export default function Home() {
   const poolContributorCount = poolData?.[1] ?? BigInt(0);
   const poolState = poolData?.[3] ?? POOL_STATE.None;
   const yourPoolTickets = shareData?.[0] ?? BigInt(0);
+  const sponsoredTickets = sponsorsData?.[0] ?? BigInt(0);
+  const sponsorCount = sponsorsData?.[1] ?? BigInt(0);
 
   // Soft cap, converted through the LIVE ticket price — never a hardcoded $1,
   // because the price is a chain value. The arithmetic lives in pool-cap.ts so
@@ -994,12 +1011,24 @@ export default function Home() {
     contractCap,
     softCapUsdc: POOL_SOFT_CAP_USDC,
   });
+  // Same cap arithmetic, a separate budget: sponsored value has its own soft cap so a
+  // sponsorship cannot consume the joiners' headroom. `contractCap` is shared — join and
+  // sponsor both route through the pool's one `_buyAndRecord`, so MAX_TICKETS_PER_JOIN is the
+  // per-transaction ceiling for both.
+  const { maxThisSponsor: sponsorMaxThisSponsor, atCap: sponsorAtCap } = poolSponsorLimits({
+    sponsoredTickets,
+    ticketPrice: poolTicketPrice,
+    contractCap,
+    softCapUsdc: POOL_SPONSOR_SOFT_CAP_USDC,
+  });
   // Derived, not clamped into state by an effect. The pool fills underneath the
   // user while this tab is open, so the maximum moves; deriving it every render
   // keeps the displayed quantity in range without a setState-in-effect, and
   // without the frame where an out-of-range number is briefly visible.
   const poolQty = poolMaxThisJoin > 0 ? Math.min(poolQuantity, poolMaxThisJoin) : 0;
   const poolCost = poolTicketPrice * BigInt(poolQty);
+  const sponsorQty = sponsorMaxThisSponsor > 0 ? Math.min(sponsorQuantity, sponsorMaxThisSponsor) : 0;
+  const sponsorCost = poolTicketPrice * BigInt(sponsorQty);
 
   // ── Pool hero, derived at render (no state, nothing to keep in sync) ──
   // Share is floored to one decimal so it can never round 0.4% up to a whole
@@ -1031,6 +1060,12 @@ export default function Home() {
     return `${name(contributors[0])} and ${n - 1} others are in`;
   })();
   const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
+  // Same USDC allowance as join — both spend from the wallet's approval to FARPOT_POOL_ADDRESS,
+  // only the quantity (and so the cost) differs. `undefined` means NEEDS approval, never "no
+  // approval needed": the allowance-race bug documented in AGENTS.md was caused by the opposite
+  // default, and the sponsor button below additionally refuses to enable at all while this is
+  // undefined rather than relying on the approve-first fallback alone.
+  const sponsorNeedsApproval = poolAllowance === undefined || poolAllowance < sponsorCost;
 
   // The contributor list is decorative; a failure hides the faces and nothing else.
   useEffect(() => {
@@ -1102,6 +1137,7 @@ export default function Home() {
       setJoinPhase("success");
       haptics.success();
       refetchPool();
+      refetchSponsors();
       refetchShare();
       refetchPoolAllowance();
       refetchUsdcBalance();
@@ -1137,6 +1173,87 @@ export default function Home() {
     refetchPool,
     refetchPoolAllowance,
     refetchShare,
+    refetchSponsors,
+    refetchUsdcBalance,
+  ]);
+
+  const handleSponsor = useCallback(async () => {
+    if (!address || sponsorQty < 1) return;
+    setSponsorError("");
+    haptics.impact();
+    try {
+      if (sponsorNeedsApproval) {
+        setSponsorPhase("approving");
+        const approveHash = await writeContract(config, {
+          address: USDC_ADDRESS,
+          abi: USDC_ABI,
+          functionName: "approve",
+          args: [FARPOT_POOL_ADDRESS, sponsorCost],
+        });
+        const approveReceipt = await confirmTransaction(config, approveHash);
+        if (approveReceipt.status === "reverted") throw new Error("Approval transaction reverted");
+      }
+      setSponsorPhase("buying");
+      // sponsor() routes through the same heavy buy path as join() (both share
+      // _buyAndRecord), so it needs the same gas buffer — see gas-buffer.ts.
+      const sponsorCalldata = encodeFunctionData({
+        abi: FARPOT_POOL_ABI,
+        functionName: "sponsor",
+        args: [sponsorQty],
+      });
+      const sponsorEstimate = await estimateGas(config, {
+        account: address,
+        to: FARPOT_POOL_ADDRESS,
+        data: sponsorCalldata,
+      });
+      const hash = await writeContract(config, {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "sponsor",
+        args: [sponsorQty],
+        gas: bufferGas(sponsorEstimate),
+      });
+      const receipt = await confirmTransaction(config, hash);
+      if (receipt.status === "reverted") throw new Error("Sponsor reverted");
+      setSponsorPhase("success");
+      haptics.success();
+      refetchPool();
+      refetchSponsors();
+      refetchShare();
+      refetchPoolAllowance();
+      refetchUsdcBalance();
+      // Re-pull the contributor list — the sponsor's own row (avatar/handle) surfaces there too.
+      setPoolRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setSponsorPhase("error");
+      haptics.error();
+      // Same distinction as handleJoin: PoolLocked clears by itself, Paused does not.
+      if (/user rejected|user denied|rejected the request/i.test(raw)) {
+        setSponsorError("Sponsor cancelled.");
+      } else if (/PoolLocked/i.test(raw)) {
+        setSponsorError("The draw is about to happen, try again shortly.");
+      } else if (/Paused/i.test(raw)) {
+        setSponsorError("Joining is paused right now. Existing pools are unaffected.");
+      } else if (/InvalidTicketCount/i.test(raw)) {
+        setSponsorError(`You can sponsor up to ${contractCap} tickets at a time.`);
+      } else if (/transfer amount exceeds balance|insufficient/i.test(raw)) {
+        setSponsorError("Not enough USDC for that many tickets.");
+      } else {
+        setSponsorError("Couldn't complete the sponsorship — try again, or try fewer tickets.");
+      }
+    }
+  }, [
+    address,
+    config,
+    contractCap,
+    sponsorCost,
+    sponsorNeedsApproval,
+    sponsorQty,
+    refetchPool,
+    refetchPoolAllowance,
+    refetchShare,
+    refetchSponsors,
     refetchUsdcBalance,
   ]);
 
@@ -3072,6 +3189,136 @@ export default function Home() {
                   </div>
                 )}
                 {joinError && <p className="text-coral text-sm mt-3">{joinError}</p>}
+              </>
+            )}
+          </div>
+
+          {/* Sponsor — a secondary CTA below Join, same surface treatment. Sponsored
+              tickets ride in the pot but carry no joiner weight of their own; a sponsor
+              who also joins still collects a joiner share of the WHOLE pot, including
+              their own sponsored tickets' winnings (see FarpotPool's
+              test_sponsorWhoAlsoJoins_collectsAJoinerShare). The copy below must never
+              say a sponsor "gets nothing" — it is false.
+
+              This panel reads only the aggregate ticket counts from sponsorsOf, never
+              sponsorShareOf's `owed`: while a sponsored drawing is still Accumulating
+              with no joiners, `owed` reports the sponsor as owed the ENTIRE pot — a
+              number that drops to zero the instant anyone joins. Same rule as
+              myPastPools/poolRowState below (no payout figure before Settled); there is
+              simply nothing here to gate because no payout figure is read at all. */}
+          <div className="play-ticket-panel">
+            <h3 className="text-white font-heading font-extrabold text-sm">Sponsor this pool</h3>
+            <p className="pool-dim text-xs mt-2">
+              Your tickets go into the pot, but their winnings pay out to everyone else who joins.
+              Sponsoring is how you improve the odds for the whole group.
+            </p>
+
+            {sponsoredTickets > BigInt(0) && (
+              // Kept as ONE template literal, not split JSX text/expression children — a
+              // newline between a text node and an adjacent {expr} is trimmed away entirely
+              // by the JSX transform (see the odds-line gotcha in AGENTS.md), which would
+              // glue "far" directly onto "by".
+              <p className="pool-dimmer text-[11px] mt-2">
+                {`${sponsoredTickets.toString()} ticket${
+                  sponsoredTickets === BigInt(1) ? "" : "s"
+                } sponsored so far${
+                  sponsorCount > BigInt(0)
+                    ? ` by ${sponsorCount.toString()} sponsor${sponsorCount === BigInt(1) ? "" : "s"}.`
+                    : "."
+                }`}
+              </p>
+            )}
+
+            {poolPaused ? (
+              <p className="pool-dim text-sm mt-3">
+                Joining is paused right now. Existing pools are unaffected.
+              </p>
+            ) : drawingState?.jackpotLock ? (
+              <p className="pool-dim text-sm mt-3">
+                The draw is about to happen, so sponsoring is closed for a few minutes. It
+                reopens for the next drawing.
+              </p>
+            ) : sponsorAtCap ? (
+              <p className="pool-dim text-sm mt-3">
+                Sponsorship for this draw is full for now — we&rsquo;re keeping sponsorships to a
+                soft cap of ${(Number(POOL_SPONSOR_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw
+                while the contract is still being audited. It reopens with the next drawing.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-white font-heading font-bold text-sm">
+                    Tickets to sponsor
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setSponsorQuantity(Math.max(1, sponsorQty - 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      −
+                    </button>
+                    <span className="text-white font-heading font-extrabold w-8 text-center">
+                      {sponsorQty}
+                    </span>
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setSponsorQuantity(Math.min(sponsorMaxThisSponsor, sponsorQty + 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <p className="pool-dimmer text-[11px] mt-2">
+                  Up to {sponsorMaxThisSponsor} per sponsorship — sponsor as often as you like.
+                </p>
+
+                {isConnected ? (
+                  <button
+                    onClick={handleSponsor}
+                    disabled={
+                      sponsorPhase === "approving" ||
+                      sponsorPhase === "buying" ||
+                      sponsorCost === BigInt(0) ||
+                      // Block while the allowance loads for the pool contract — treating
+                      // an unknown allowance as "no approval needed" is the exact race
+                      // documented in AGENTS.md.
+                      poolAllowance === undefined
+                    }
+                    className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
+                      sponsorPhase === "approving" ||
+                      sponsorPhase === "buying" ||
+                      sponsorCost === BigInt(0) ||
+                      poolAllowance === undefined
+                        ? "bg-white/5 text-mut cursor-not-allowed"
+                        : "btn-gold"
+                    } ${sponsorPhase === "approving" || sponsorPhase === "buying" ? "animate-pulse" : ""}`}
+                  >
+                    {sponsorPhase === "approving"
+                      ? "Approving USDC…"
+                      : sponsorPhase === "buying"
+                        ? "Sponsoring…"
+                        : poolAllowance === undefined
+                          ? "Checking approval…"
+                          : `Sponsor ${sponsorQty} Ticket${sponsorQty === 1 ? "" : "s"} · $${formatUnits(sponsorCost, USDC_DECIMALS)}`}
+                  </button>
+                ) : (
+                  <div className="mt-4">
+                    <ConnectWallet />
+                  </div>
+                )}
+
+                {sponsorPhase === "success" && (
+                  <p className="text-wins-green text-sm font-heading font-bold mt-3">
+                    Sponsored 🎁
+                  </p>
+                )}
+                {sponsorError && <p className="text-coral text-sm mt-3">{sponsorError}</p>}
               </>
             )}
           </div>
