@@ -3,11 +3,11 @@
 // The aggregate numbers on the Pool tab come from the CONTRACT, read client-side via wagmi
 // (`poolOf` / `shareOf`) — cheap, authoritative, and always available. This route exists only
 // to answer the one question the contract cannot: WHICH addresses are in, which needs the
-// `Joined` logs.
+// `Joined` (and `Sponsored`) logs.
 //
 // That split is the whole safety story. If this route fails, the tab degrades to numbers and
 // hides the avatar row; it never renders a wrong list. So every failure path here returns
-// `degraded: true` with an empty list rather than a partial one.
+// `degraded: true` with empty lists rather than partial ones — for contributors AND sponsors.
 
 import { NextResponse } from "next/server";
 import { createPublicClient, http, type Address } from "viem";
@@ -23,11 +23,13 @@ import {
   acquireLock,
   addContributors,
   addContributorDrawings,
+  addSponsors,
   getContributorDrawings,
   cacheEnabled,
   freezeDrawing,
   getContributors,
   getCursor,
+  getSponsors,
   isFrozen,
   releaseLock,
   setCursor,
@@ -54,6 +56,10 @@ const JOINED_EVENT = FARPOT_POOL_ABI.find(
   (entry) => entry.type === "event" && entry.name === "Joined",
 )!;
 
+const SPONSORED_EVENT = FARPOT_POOL_ABI.find(
+  (entry) => entry.type === "event" && entry.name === "Sponsored",
+)!;
+
 const client = createPublicClient({
   chain: base,
   transport: http(process.env.BASE_RPC_URL ?? "https://mainnet.base.org"),
@@ -72,9 +78,15 @@ interface NeynarBulkUser {
 }
 
 /**
- * Scan `Joined` logs from the cursor to the confirmed head, storing contributor addresses.
+ * Scan `Joined` and `Sponsored` logs from the cursor to the confirmed head, in ONE range walk.
  *
- * Returns the drawing ids touched, so the caller knows what may now be freezable.
+ * Both event classes are pulled via `events:` in the same `getLogs` call rather than two
+ * independent scans — a second scan would need a second cursor and could not stay atomic with
+ * the first, breaking the "cursor only advances over ranges fully processed" invariant.
+ *
+ * `Joined` logs feed both the forward (drawing → addresses) and reverse (address → drawings)
+ * contributor indexes. `Sponsored` logs feed ONLY the sponsor set — never the reverse index —
+ * so a sponsor-only drawing never offers a joiner claim path that correctly pays zero.
  */
 async function scan(confirmedHead: bigint): Promise<void> {
   const cursor = await getCursor();
@@ -91,35 +103,49 @@ async function scan(confirmedHead: bigint): Promise<void> {
     const to = from + CHUNK - BigInt(1) > confirmedHead ? confirmedHead : from + CHUNK - BigInt(1);
     const logs = await client.getLogs({
       address: FARPOT_POOL_ADDRESS,
-      event: JOINED_EVENT as never,
+      events: [JOINED_EVENT, SPONSORED_EVENT] as never,
       fromBlock: from,
       toBlock: to,
     });
 
-    // Two indexes off one pass: drawing → addresses (the "who's in" row) and address →
-    // drawings (the claim history). Deriving both here means they cannot drift apart, and the
-    // reverse index costs no extra RPC.
+    // Three indexes off one pass: drawing → joiner addresses (the "who's in" row), address →
+    // drawings (the claim history), and drawing → sponsor addresses. Deriving all three here
+    // means they cannot drift apart, and the extra indexes cost no extra RPC.
     const byDrawing = new Map<bigint, Set<string>>();
     const byAddress = new Map<string, Set<bigint>>();
+    const sponsorsByDrawing = new Map<bigint, Set<string>>();
     for (const log of logs) {
-      const args = (log as { args?: { drawingId?: bigint; contributor?: string } }).args;
-      if (args?.drawingId === undefined || !args.contributor) continue;
-      const who = args.contributor.toLowerCase();
-      const set = byDrawing.get(args.drawingId) ?? new Set<string>();
-      set.add(who);
-      byDrawing.set(args.drawingId, set);
-      const drawings = byAddress.get(who) ?? new Set<bigint>();
-      drawings.add(args.drawingId);
-      byAddress.set(who, drawings);
+      const eventName = (log as { eventName?: string }).eventName;
+      if (eventName === "Joined") {
+        const args = (log as { args?: { drawingId?: bigint; contributor?: string } }).args;
+        if (args?.drawingId === undefined || !args.contributor) continue;
+        const who = args.contributor.toLowerCase();
+        const set = byDrawing.get(args.drawingId) ?? new Set<string>();
+        set.add(who);
+        byDrawing.set(args.drawingId, set);
+        const drawings = byAddress.get(who) ?? new Set<bigint>();
+        drawings.add(args.drawingId);
+        byAddress.set(who, drawings);
+      } else if (eventName === "Sponsored") {
+        const args = (log as { args?: { drawingId?: bigint; sponsor?: string } }).args;
+        if (args?.drawingId === undefined || !args.sponsor) continue;
+        const who = args.sponsor.toLowerCase();
+        const set = sponsorsByDrawing.get(args.drawingId) ?? new Set<string>();
+        set.add(who);
+        sponsorsByDrawing.set(args.drawingId, set);
+      }
     }
 
-    // Both indexes FIRST, cursor LAST. A crash between them re-scans this chunk, which is
+    // All indexes FIRST, cursor LAST. A crash between them re-scans this chunk, which is
     // idempotent; the opposite order would skip it and lose those records for good.
     for (const [drawingId, addresses] of byDrawing) {
       await addContributors(drawingId, [...addresses]);
     }
     for (const [who, drawings] of byAddress) {
       await addContributorDrawings(who, [...drawings]);
+    }
+    for (const [drawingId, addresses] of sponsorsByDrawing) {
+      await addSponsors(drawingId, [...addresses]);
     }
     await setCursor(to);
 
@@ -237,65 +263,104 @@ export async function GET(request: Request) {
       : [];
 
     const addresses = await getContributors(drawingId);
-    if (addresses.length === 0) {
-      return NextResponse.json(
-        { drawingId: drawingId.toString(), contributors: [], yourDrawings, degraded: false },
-        { headers: { "cache-control": `s-maxage=${REVALIDATE_SECONDS}, stale-while-revalidate` } },
-      );
-    }
-
-    // Weights come from the CHAIN, never from the cache, so a displayed number cannot drift
-    // from contract state no matter what the scan did.
-    const weights = await client.multicall({
-      contracts: addresses.map((address) => ({
-        address: FARPOT_POOL_ADDRESS,
-        abi: FARPOT_POOL_ABI,
-        functionName: "shareOf" as const,
-        args: [drawingId, address as Address],
-      })),
-      allowFailure: true,
-    });
-
-    const identities = await resolveIdentities(addresses);
-
-    // If ANY weight read failed, the list we could build is incomplete — and an incomplete
-    // list is indistinguishable from a complete one to the user, who would see a real player
-    // missing. Silently skipping the failures and returning degraded:false would also cache
-    // that incomplete answer at the CDN for the revalidate window. Degrade instead: numbers
-    // only, no faces, which is the invariant this route exists to hold.
-    if (weights.some((w) => w?.status !== "success")) {
-      console.error("[pool:contributors] weight read failed for at least one address");
-      return degraded(drawingId);
-    }
+    const sponsorAddresses = await getSponsors(drawingId);
 
     const contributors: Contributor[] = [];
-    addresses.forEach((address, i) => {
-      const result = weights[i];
-      if (result?.status !== "success") return;
-      const tickets = (result.result as readonly [bigint, bigint, boolean])[0];
-      // A zero weight means this address never actually joined this drawing — a stale cache
-      // entry. Drop it rather than render a contributor with no tickets.
-      if (tickets === BigInt(0)) return;
-      const user = identities.get(address);
-      contributors.push({
-        address,
-        tickets: tickets.toString(),
-        username: user?.username ?? null,
-        pfp: user?.pfp_url ?? null,
+    if (addresses.length > 0) {
+      // Weights come from the CHAIN, never from the cache, so a displayed number cannot drift
+      // from contract state no matter what the scan did.
+      const weights = await client.multicall({
+        contracts: addresses.map((address) => ({
+          address: FARPOT_POOL_ADDRESS,
+          abi: FARPOT_POOL_ABI,
+          functionName: "shareOf" as const,
+          args: [drawingId, address as Address],
+        })),
+        allowFailure: true,
       });
-    });
 
-    // Identified users first (a stable sort, so ticket order still holds within each group),
-    // matching the ticker's convention — otherwise the avatars, which are the point of the
-    // row, get pushed off the end by bare wallets that happen to hold more tickets.
-    contributors.sort((a, b) => {
-      const named = Number(Boolean(b.username)) - Number(Boolean(a.username));
-      if (named !== 0) return named;
-      return Number(BigInt(b.tickets) - BigInt(a.tickets));
-    });
+      // If ANY weight read failed, the list we could build is incomplete — and an incomplete
+      // list is indistinguishable from a complete one to the user, who would see a real player
+      // missing. Silently skipping the failures and returning degraded:false would also cache
+      // that incomplete answer at the CDN for the revalidate window. Degrade instead: numbers
+      // only, no faces, which is the invariant this route exists to hold. A failure here
+      // degrades sponsors too — a partial list must never render, for either side.
+      if (weights.some((w) => w?.status !== "success")) {
+        console.error("[pool:contributors] weight read failed for at least one address");
+        return degraded(drawingId);
+      }
+
+      const identities = await resolveIdentities(addresses);
+      addresses.forEach((address, i) => {
+        const result = weights[i];
+        if (result?.status !== "success") return;
+        const tickets = (result.result as readonly [bigint, bigint, boolean])[0];
+        // A zero weight means this address never actually joined this drawing — a stale cache
+        // entry. Drop it rather than render a contributor with no tickets.
+        if (tickets === BigInt(0)) return;
+        const user = identities.get(address);
+        contributors.push({
+          address,
+          tickets: tickets.toString(),
+          username: user?.username ?? null,
+          pfp: user?.pfp_url ?? null,
+        });
+      });
+
+      // Identified users first (a stable sort, so ticket order still holds within each group),
+      // matching the ticker's convention — otherwise the avatars, which are the point of the
+      // row, get pushed off the end by bare wallets that happen to hold more tickets.
+      contributors.sort((a, b) => {
+        const named = Number(Boolean(b.username)) - Number(Boolean(a.username));
+        if (named !== 0) return named;
+        return Number(BigInt(b.tickets) - BigInt(a.tickets));
+      });
+    }
+
+    const sponsors: Contributor[] = [];
+    if (sponsorAddresses.length > 0) {
+      const sponsorWeights = await client.multicall({
+        contracts: sponsorAddresses.map((address) => ({
+          address: FARPOT_POOL_ADDRESS,
+          abi: FARPOT_POOL_ABI,
+          functionName: "sponsoredByUser" as const,
+          args: [drawingId, address as Address],
+        })),
+        allowFailure: true,
+      });
+
+      // Same rule as the contributor weights: a partial sponsor list must never render.
+      if (sponsorWeights.some((w) => w?.status !== "success")) {
+        console.error("[pool:contributors] sponsor weight read failed for at least one address");
+        return degraded(drawingId);
+      }
+
+      const sponsorIdentities = await resolveIdentities(sponsorAddresses);
+      sponsorAddresses.forEach((address, i) => {
+        const result = sponsorWeights[i];
+        if (result?.status !== "success") return;
+        const tickets = result.result as bigint;
+        // A zero weight means this address never actually sponsored this drawing — a stale
+        // cache entry. Drop it rather than render a sponsor with no tickets.
+        if (tickets === BigInt(0)) return;
+        const user = sponsorIdentities.get(address);
+        sponsors.push({
+          address,
+          tickets: tickets.toString(),
+          username: user?.username ?? null,
+          pfp: user?.pfp_url ?? null,
+        });
+      });
+
+      // Deliberately NOT sorted, unlike contributors: a later feature breaks a billing tie by
+      // "earliest sponsor at the maximum weight", derived from the order this route returns.
+      // (`sponsorAddresses` itself comes back from a Redis Set via `getSponsors`, which does not
+      // guarantee insertion order — see pool-cache.ts. This preserves whatever order arrives
+      // rather than compounding the loss with a second re-sort.)
+    }
 
     return NextResponse.json(
-      { drawingId: drawingId.toString(), contributors, yourDrawings, degraded: false },
+      { drawingId: drawingId.toString(), contributors, sponsors, yourDrawings, degraded: false },
       { headers: { "cache-control": `s-maxage=${REVALIDATE_SECONDS}, stale-while-revalidate` } },
     );
   } catch (err) {
@@ -315,7 +380,13 @@ export async function GET(request: Request) {
 /** Numbers-only response: the client hides the avatar row and renders contract totals. */
 function degraded(drawingId: bigint) {
   return NextResponse.json(
-    { drawingId: drawingId.toString(), contributors: [], yourDrawings: [], degraded: true },
+    {
+      drawingId: drawingId.toString(),
+      contributors: [],
+      sponsors: [],
+      yourDrawings: [],
+      degraded: true,
+    },
     { headers: { "cache-control": "no-store" } },
   );
 }
