@@ -257,6 +257,11 @@ contract FarpotPoolSponsorTest is PoolTestBase {
         _rollover();
         _drainCursor(d);
 
+        // The view reports the non-zero fallback share BEFORE anyone claims, proving it is
+        // not dead code that only ever returns 0.
+        (, uint256 aliceOwedBefore,) = pool.sponsorShareOf(d, alice);
+        assertEq(aliceOwedBefore, (staked * 3) / 4, "alice's owed share, pre-claim");
+
         uint256 aliceBefore = usdc.balanceOf(alice);
         uint256 bobBefore = usdc.balanceOf(bob);
         uint256[] memory ds = new uint256[](1);
@@ -269,6 +274,13 @@ contract FarpotPoolSponsorTest is PoolTestBase {
         // 3:1 by sponsored weight.
         assertEq(usdc.balanceOf(alice) - aliceBefore, (staked * 3) / 4, "alice's sponsored share");
         assertEq(usdc.balanceOf(bob) - bobBefore, staked / 4, "bob's sponsored share");
+
+        // And drops to 0 once claimed - `hasClaimed` gates `owed` the same way it does for
+        // `shareOf`.
+        (,, bool aliceClaimedAfter) = pool.sponsorShareOf(d, alice);
+        assertTrue(aliceClaimedAfter);
+        (, uint256 aliceOwedAfter,) = pool.sponsorShareOf(d, alice);
+        assertEq(aliceOwedAfter, 0, "alice's owed share, post-claim");
     }
 
     function test_fallback_disappearsWhenAJoinerArrives() public {
@@ -297,7 +309,8 @@ contract FarpotPoolSponsorTest is PoolTestBase {
         uint256 d = jackpot.currentDrawingId();
         _sponsor(alice, 5);
 
-        // While the drawing is sponsor-only, alice is nominally owed the pot...
+        // Before settlement (`d` is still the current drawing, so `pot[d] == 0`), the view
+        // already reports alice's sponsored weight and that she has not claimed...
         (uint256 t1,, bool c1) = pool.sponsorShareOf(d, alice);
         assertEq(t1, 5);
         assertFalse(c1);

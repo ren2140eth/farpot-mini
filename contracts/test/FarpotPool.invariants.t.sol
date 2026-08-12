@@ -168,6 +168,12 @@ contract FarpotPoolInvariantsTest is Test {
         for (uint256 i; i < handler.touchedCount(); ++i) {
             uint256 d = handler.touchedDrawings(i);
             uint256 total = pool.totalTickets(d);
+            // KNOWN GAP: this skips exactly the sponsor-only drawings the zero-joiner
+            // fallback pays (see FarpotPool.claim). The handler has no `sponsor` action, so
+            // the fuzzer cannot build one anyway — this invariant currently says nothing
+            // about that payout path. Extending this loop to walk both classes AND adding
+            // the handler's `sponsor` action are Task 6's job; do not partially fix one
+            // without the other here.
             if (total == 0) continue;
             uint256 potAmount = pool.pot(d);
             for (uint256 a; a < handler.actorCount(); ++a) {
