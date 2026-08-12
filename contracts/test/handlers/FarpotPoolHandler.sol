@@ -37,6 +37,10 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
     uint256[] public touchedDrawings;
     mapping(uint256 => bool) internal _seen;
 
+    /// @dev Drawings `markWinners` has actually put winnings on, so `rollover` can tell a
+    ///      drawing that will settle to a payable pot from one that will settle to zero.
+    mapping(uint256 => bool) public markedDrawing;
+
     /*//////////////////////////////////////////////////////////////
                                GHOST STATE
     //////////////////////////////////////////////////////////////*/
@@ -69,6 +73,8 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
     //////////////////////////////////////////////////////////////*/
 
     uint256 public okJoin;
+    uint256 public okSponsor;
+    uint256 public okSponsorFallbackClaim;
     uint256 public okClaimBatch;
     uint256 public okClaim;
     uint256 public okRollover;
@@ -108,6 +114,34 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
         return actors[bound(seed, 0, actors.length - 1)];
     }
 
+    /// @notice One drawing in three accepts sponsors only — `join` declines these.
+    /// @dev CALIBRATED FROM MEASUREMENT, in the same spirit as the claim-candidate selection
+    ///      below. The zero-joiner fallback only pays on a drawing that SETTLES with sponsored
+    ///      tickets and no joiner weight at all, and left to chance that is a coin-flip streak:
+    ///      `join` and `sponsor` fire at the same rate, so a drawing stays sponsor-only only if
+    ///      every one of its ~4-5 buys happened to be a sponsor. Measured over three seeds with
+    ///      no reserved lane, a whole run produced 2/0/1 sponsor-only drawings and 0/0/2
+    ///      fallback claims — so on most seeds the new payout branch was never executed once,
+    ///      and every sponsor invariant held vacuously over it.
+    ///
+    ///      Reserving a deterministic lane makes that branch reachable EVERY run without
+    ///      weakening anything else: the other two drawings in three still take joins and
+    ///      sponsors in any order the fuzzer likes, so mixed pools — including the
+    ///      sponsor-first-then-joiner ordering that flips the active claimant class, which is
+    ///      exactly what I11 exists to check — remain fully covered.
+    ///
+    ///      The reservation LIFTS as soon as the fallback branch has actually paid once. A
+    ///      permanent 1-in-3 lane was measured costing more than it was worth: it dropped a
+    ///      run's `okJoin` from ~39-48 to a low tail of 9, tripping the PRE-EXISTING join
+    ///      floor of 10 — buying sponsor coverage by quietly starving joiner coverage is not a
+    ///      trade worth making, and lowering that floor to hide it would defeat its purpose.
+    ///      Lifting the lane confines the cost to the early part of a run, which is all the
+    ///      reachability actually needs: one settled, funded sponsor-only drawing per run.
+    function _isSponsorLane(uint256 drawingId) internal view returns (bool) {
+        if (okSponsorFallbackClaim > 0) return false;
+        return drawingId % 3 == 0;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                 ACTIONS
     //////////////////////////////////////////////////////////////*/
@@ -117,6 +151,7 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
 
         uint256 d = jackpot.currentDrawingId();
         if (jackpot.getDrawingState(d).jackpotLock) return;
+        if (_isSponsorLane(d)) return;
 
         uint32 n = uint32(bound(countSeed, 1, pool.MAX_TICKETS_PER_JOIN()));
         address who = _actor(actorSeed);
@@ -132,6 +167,64 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
             touchedDrawings.push(d);
         }
         ++okJoin;
+    }
+
+    /// @dev Modelled exactly on `join` — same actor selection, same balance pre-check, same
+    ///      early-return-instead-of-revert discipline — because the only difference that
+    ///      matters is the one under test: these tickets carry NO payout weight.
+    function sponsor(uint256 actorSeed, uint256 countSeed) external {
+        if (pool.paused()) return;
+
+        uint256 d = jackpot.currentDrawingId();
+        if (jackpot.getDrawingState(d).jackpotLock) return;
+
+        uint32 n = uint32(bound(countSeed, 1, pool.MAX_TICKETS_PER_JOIN()));
+        address who = _actor(actorSeed);
+
+        uint256 cost = n * jackpot.getDrawingState(d).ticketPrice;
+        if (usdc.balanceOf(who) < cost) return;
+
+        vm.prank(who);
+        pool.sponsor(n);
+
+        if (!_seen[d]) {
+            _seen[d] = true;
+            touchedDrawings.push(d);
+        }
+        ++okSponsor;
+    }
+
+    /// @notice Touched drawings that hold sponsored tickets and no joiner weight at all.
+    function okSponsorOnlyDrawings() external view returns (uint256 n) {
+        for (uint256 i; i < touchedDrawings.length; ++i) {
+            if (_isSponsorOnly(touchedDrawings[i])) ++n;
+        }
+    }
+
+    function _isSponsorOnly(uint256 drawingId) internal view returns (bool) {
+        return pool.totalSponsored(drawingId) > 0 && pool.totalTickets(drawingId) == 0;
+    }
+
+    /// @notice True until the zero-joiner fallback has actually PAID once this run.
+    /// @dev The three actions below steer toward finishing that payout chain while this holds,
+    ///      and go back to sampling freely the moment it flips.
+    ///
+    ///      WHY THE STEERING IS NEEDED. Reserving a sponsor lane makes a sponsor-only drawing
+    ///      exist, but existing is not the same as PAYING: the fallback only executes once such
+    ///      a drawing has winnings marked on it, is drained to `Settled`, and is then claimed
+    ///      by an actor who actually sponsored it. Left to the random walk, all four links had
+    ///      to line up inside one run's call budget, and measurement showed they usually did
+    ///      but not always — roughly 1 run in 350 finished with zero fallback claims, which is
+    ///      invisible locally and near-certain to fail under the `ci` profile's 500 runs. A
+    ///      floor that fails one run in three hundred is worse than no floor: it trains people
+    ///      to re-run CI until it goes green. So the chain is made reliable rather than the
+    ///      floor made lax.
+    ///
+    ///      The steering is deliberately NARROW — it only ever picks among choices the action
+    ///      could already have made, never invents a new one, and it switches off after the
+    ///      first fallback payout, so the rest of every run is the same unbiased walk as before.
+    function _chasingFallback() internal view returns (bool) {
+        return okSponsorFallbackClaim == 0;
     }
 
     /// @dev Chooses among drawings that are ACTUALLY claimable rather than picking blindly
@@ -156,6 +249,15 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
                 candidates[c++] = t;
             }
             if (c == 0) return;
+            // While the fallback chain is unfinished, drain sponsor-only pots first if any are
+            // waiting — a sponsor-only pot that never reaches `Settled` can never be claimed.
+            if (_chasingFallback()) {
+                uint256 s;
+                for (uint256 i; i < c; ++i) {
+                    if (_isSponsorOnly(candidates[i])) candidates[s++] = candidates[i];
+                }
+                if (s != 0) c = s;
+            }
             d = candidates[bound(drawingSeed, 0, c - 1)];
         }
 
@@ -188,10 +290,29 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
                 candidates[c++] = t;
             }
             if (c == 0) return;
+            if (_chasingFallback()) {
+                uint256 s;
+                for (uint256 i; i < c; ++i) {
+                    if (_isSponsorOnly(candidates[i])) candidates[s++] = candidates[i];
+                }
+                if (s != 0) c = s;
+            }
             d = candidates[bound(drawingSeed, 0, c - 1)];
         }
 
+        // Picking blindly among four actors when only the sponsors of a sponsor-only drawing
+        // can be paid turns the last link of the chain into another coin flip.
         address who = _actor(actorSeed);
+        if (_chasingFallback() && _isSponsorOnly(d)) {
+            address[] memory eligible = new address[](actors.length);
+            uint256 e;
+            for (uint256 a; a < actors.length; ++a) {
+                if (pool.sponsoredByUser(d, actors[a]) > 0 && !pool.claimed(d, actors[a])) {
+                    eligible[e++] = actors[a];
+                }
+            }
+            if (e != 0) who = eligible[bound(actorSeed, 0, e - 1)];
+        }
         uint256[] memory ds = new uint256[](1);
         ds[0] = d;
 
@@ -203,6 +324,10 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
         ghostPaidPerDrawing[d] += paid;
         ghostPaidTotal += paid;
         ++okClaim;
+        // Fallback claims are the only genuinely new payout branch, so they get their own
+        // counter. Folding them into okClaim would let a campaign of ordinary joiner claims
+        // satisfy the floor while never once exercising the sponsor path.
+        if (paid > 0 && pool.totalTickets(d) == 0) ++okSponsorFallbackClaim;
         _recordSolvencyCoverage();
     }
 
@@ -249,6 +374,11 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
         uint256 d = jackpot.currentDrawingId();
         (,,,,, uint256 count) = pool.poolOf(d);
         if (count < 15) return;
+        // A sponsor-only drawing that rolls over with no winnings marked settles to a ZERO pot,
+        // and a zero pot pays nobody — so it can never exercise the fallback no matter how it
+        // is claimed afterwards. Holding it open until `markWinners` has landed removes the
+        // one link in the chain that pure ordering luck was deciding.
+        if (_chasingFallback() && _isSponsorOnly(d) && !markedDrawing[d]) return;
         jackpot.setCurrentDrawingId(d + 1);
         ++okRollover;
     }
@@ -271,6 +401,9 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
             jackpot.setWinnings(id, amount);
             ++marked;
         }
-        if (marked != 0) ++okMarkWinners;
+        if (marked != 0) {
+            markedDrawing[d] = true;
+            ++okMarkWinners;
+        }
     }
 }

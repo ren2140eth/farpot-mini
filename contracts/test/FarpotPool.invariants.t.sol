@@ -12,8 +12,8 @@ import {MockRandomTicketBuyer} from "./mocks/MockRandomTicketBuyer.sol";
 import {MockTicketNFT} from "./mocks/MockTicketNFT.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 
-/// @notice Invariants I1–I10 from design §4.3 over arbitrary interleavings of
-///         `join` / `claimBatch` / `claim` / rollover.
+/// @notice Invariants I1–I12 from design §4.3 over arbitrary interleavings of
+///         `join` / `sponsor` / `claimBatch` / `claim` / rollover.
 /// @dev This suite is the only artefact that would automatically have caught the
 ///      accounting-shaped defects five design review rounds found by inspection. Every
 ///      invariant below is checked against OBSERVABLE state — the NFT's ownership and the
@@ -51,12 +51,14 @@ contract FarpotPoolInvariantsTest is Test {
                               I1 – I3, I6
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev I1: the recorded id list and the ticket counter can never disagree.
+    /// @dev I1: the recorded id list and the two ticket counters can never disagree. Sponsored
+    ///      tickets are in the list but NOT in `totalTickets`, so the sum is the property —
+    ///      and this is what catches a sponsor being wrongly credited payout weight.
     function invariant_I1_ticketIdsLengthMatchesTotalTickets() public view {
         for (uint256 i; i < handler.touchedCount(); ++i) {
             uint256 d = handler.touchedDrawings(i);
             (,,,,, uint256 ticketCount) = pool.poolOf(d);
-            assertEq(ticketCount, pool.totalTickets(d), "I1");
+            assertEq(ticketCount, pool.totalTickets(d) + pool.totalSponsored(d), "I1");
         }
     }
 
@@ -106,6 +108,30 @@ contract FarpotPoolInvariantsTest is Test {
                 if (pool.ticketsByUser(d, handler.actors(a)) > 0) ++n;
             }
             assertEq(n, pool.contributorCount(d), "I6");
+        }
+    }
+
+    /// @dev I2s: sponsored weights must sum to the sponsored total, or fallback shares are
+    ///      mispriced exactly the way I2 guards the joiner path.
+    function invariant_I2s_sponsorWeightsSumToTotal() public view {
+        for (uint256 i; i < handler.touchedCount(); ++i) {
+            uint256 d = handler.touchedDrawings(i);
+            uint256 sum;
+            for (uint256 a; a < handler.actorCount(); ++a) {
+                sum += pool.sponsoredByUser(d, handler.actors(a));
+            }
+            assertEq(sum, pool.totalSponsored(d), "I2s");
+        }
+    }
+
+    function invariant_I6s_sponsorCountMatchesNonZeroWeights() public view {
+        for (uint256 i; i < handler.touchedCount(); ++i) {
+            uint256 d = handler.touchedDrawings(i);
+            uint256 n;
+            for (uint256 a; a < handler.actorCount(); ++a) {
+                if (pool.sponsoredByUser(d, handler.actors(a)) > 0) ++n;
+            }
+            assertEq(n, pool.sponsorCount(d), "I6s");
         }
     }
 
@@ -168,20 +194,19 @@ contract FarpotPoolInvariantsTest is Test {
         for (uint256 i; i < handler.touchedCount(); ++i) {
             uint256 d = handler.touchedDrawings(i);
             uint256 total = pool.totalTickets(d);
-            // KNOWN GAP: this skips exactly the sponsor-only drawings the zero-joiner
-            // fallback pays (see FarpotPool.claim). The handler has no `sponsor` action, so
-            // the fuzzer cannot build one anyway — this invariant currently says nothing
-            // about that payout path. Extending this loop to walk both classes AND adding
-            // the handler's `sponsor` action are Task 6's job; do not partially fix one
-            // without the other here.
-            if (total == 0) continue;
+            // Class selection mirrors `claim`. Skipping `total == 0` (as this did before
+            // sponsors existed) would skip every sponsor-only pot — the one path most in
+            // need of a solvency proof.
+            bool toSponsors = total == 0;
+            uint256 denom = toSponsors ? pool.totalSponsored(d) : total;
+            if (denom == 0) continue;
             uint256 potAmount = pool.pot(d);
             for (uint256 a; a < handler.actorCount(); ++a) {
                 address who = handler.actors(a);
                 if (pool.claimed(d, who)) continue;
-                uint256 w = pool.ticketsByUser(d, who);
+                uint256 w = toSponsors ? pool.sponsoredByUser(d, who) : pool.ticketsByUser(d, who);
                 if (w == 0) continue;
-                owedTotal += FixedPointMathLib.fullMulDiv(potAmount, w, total);
+                owedTotal += FixedPointMathLib.fullMulDiv(potAmount, w, denom);
             }
         }
         assertGe(usdc.balanceOf(address(pool)), owedTotal, "I7 insolvent");
@@ -217,6 +242,83 @@ contract FarpotPoolInvariantsTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                           I11 & I12 — SPONSORS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev I11: exactly one claimant class is active per drawing, selected SOLELY by
+    ///      `totalTickets == 0` — and if there is money to pay and someone unclaimed to pay
+    ///      it to, the active class must actually be owed something.
+    ///
+    ///      The liveness half is not decoration. Stated only as "one class is owed zero", the
+    ///      invariant is satisfied by an implementation that owes EVERYONE zero and strands
+    ///      the whole pot — which is the exact bug it exists to catch, and which I7 would also
+    ///      pass because I7 only asserts the balance covers liabilities it can see.
+    function invariant_I11_exactlyOneClaimantClassIsActive() public view {
+        for (uint256 i; i < handler.touchedCount(); ++i) {
+            uint256 d = handler.touchedDrawings(i);
+            bool toSponsors = pool.totalTickets(d) == 0;
+            uint256 activeUnclaimedWeight;
+            uint256 activeOwed;
+
+            for (uint256 a; a < handler.actorCount(); ++a) {
+                address who = handler.actors(a);
+                (, uint256 joinerOwed,) = pool.shareOf(d, who);
+                (, uint256 sponsorOwed,) = pool.sponsorShareOf(d, who);
+
+                if (toSponsors) {
+                    assertEq(joinerOwed, 0, "I11 inactive joiner owed");
+                    activeOwed += sponsorOwed;
+                    if (!pool.claimed(d, who)) activeUnclaimedWeight += pool.sponsoredByUser(d, who);
+                } else {
+                    assertEq(sponsorOwed, 0, "I11 inactive sponsor owed");
+                    activeOwed += joinerOwed;
+                    if (!pool.claimed(d, who)) activeUnclaimedWeight += pool.ticketsByUser(d, who);
+                }
+            }
+
+            // Liveness: money + an unclaimed claimant must imply a non-zero entitlement.
+            // Guarded on the pot being big enough that floor division cannot legitimately
+            // round every share to zero.
+            //
+            // The comparison is against the DENOMINATOR, because the denominator is what
+            // divides. Guarding on `pot >= activeUnclaimedWeight` instead is not equivalent
+            // and fires on legitimate dust: partial claims shrink the unclaimed weight while
+            // the divisor stays put, so the two stop tracking each other. Measured repro
+            // (drawing 132, seed 11): pot = 1 wei, totalTickets = 11, one joiner already
+            // claimed with weight 10, one unclaimed with weight 1. `pot(1) >= unclaimed(1)`
+            // held, but the real share is floor(1 * 1 / 11) = 0 — a 1-wei pot simply cannot
+            // pay an 11-ticket denominator, and every claimant on that drawing correctly got
+            // zero. `pot >= denom` is the condition that actually implies a payable share:
+            // it makes one unit of weight worth at least 1 wei, so ANY non-zero unclaimed
+            // weight must be owed something. The liveness half stays fully real — an
+            // implementation that owes everyone zero while holding a payable pot still fails
+            // here, which is the bug this clause exists to catch.
+            uint256 denom = toSponsors ? pool.totalSponsored(d) : pool.totalTickets(d);
+            if (denom > 0 && pool.pot(d) >= denom && activeUnclaimedWeight > 0) {
+                assertGt(activeOwed, 0, "I11 pot is stranded - nobody is owed it");
+            }
+        }
+    }
+
+    /// @dev I12: conservation. What has been paid plus what is still owed can never exceed the
+    ///      pot, across every claim ordering the fuzzer produces. This is the property that
+    ///      distinguishes intended floor-division dust from a leak.
+    function invariant_I12_paidPlusOwedNeverExceedsPot() public view {
+        for (uint256 i; i < handler.touchedCount(); ++i) {
+            uint256 d = handler.touchedDrawings(i);
+            bool toSponsors = pool.totalTickets(d) == 0;
+            uint256 owed;
+            for (uint256 a; a < handler.actorCount(); ++a) {
+                address who = handler.actors(a);
+                if (pool.claimed(d, who)) continue;
+                (, uint256 amount,) = toSponsors ? pool.sponsorShareOf(d, who) : pool.shareOf(d, who);
+                owed += amount;
+            }
+            assertLe(handler.ghostPaidPerDrawing(d) + owed, pool.pot(d), "I12");
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
                              COVERAGE FLOOR
     //////////////////////////////////////////////////////////////*/
 
@@ -243,6 +345,10 @@ contract FarpotPoolInvariantsTest is Test {
         assertGe(handler.okClaim(), 1, "coverage: claim never reached");
         assertGe(handler.distinctFundedDrawings(), 1, "coverage: no drawing was ever funded");
         assertGe(handler.maxCoexistingUnclaimedPots(), 1, "coverage: no pot was ever left unclaimed");
+
+        assertGe(handler.okSponsor(), 5, "coverage: sponsor never exercised");
+        assertGe(handler.okSponsorOnlyDrawings(), 1, "coverage: no sponsor-only drawing was ever built");
+        assertGe(handler.okSponsorFallbackClaim(), 1, "coverage: the sponsor fallback claim never paid");
 
         // NOTE ON WHY THESE ARE LOW. An earlier version demanded two COEXISTING funded pots
         // here, to force I7 to test cross-pot solvency rather than collapsing into I5. That
