@@ -75,6 +75,11 @@ abstract contract PoolTestBase is Test {
         pool.join(n);
     }
 
+    function _sponsor(address who, uint32 n) internal {
+        vm.prank(who);
+        pool.sponsor(n);
+    }
+
     /// @notice Settle the current drawing and roll over — atomic upstream, one write here.
     function _rollover() internal {
         jackpot.setCurrentDrawingId(jackpot.currentDrawingId() + 1);

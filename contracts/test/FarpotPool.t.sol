@@ -155,6 +155,101 @@ contract FarpotPoolJoinTest is PoolTestBase {
 }
 
 /*//////////////////////////////////////////////////////////////////////////////
+                                   SPONSOR
+//////////////////////////////////////////////////////////////////////////////*/
+
+contract FarpotPoolSponsorTest is PoolTestBase {
+    function test_sponsor_recordsTicketsButNoWeight() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 3);
+
+        // The pool owns the tickets and will claim them...
+        assertEq(_poolOwnedTickets(d), 3, "pool must own the sponsored tickets");
+        (uint256 tickets, uint256 contributors,,,, uint256 ticketCount) = pool.poolOf(d);
+        assertEq(ticketCount, 3, "sponsored tickets are in the claim list");
+
+        // ...but the sponsor holds no payout weight and is not a contributor.
+        assertEq(tickets, 0, "totalTickets must stay joiner-only");
+        assertEq(contributors, 0, "a sponsor is not a contributor");
+        assertEq(pool.ticketsByUser(d, alice), 0, "a sponsor has no joiner weight");
+
+        (uint256 sponsoredTickets, uint256 sponsors) = pool.sponsorsOf(d);
+        assertEq(sponsoredTickets, 3);
+        assertEq(sponsors, 1);
+        assertEq(pool.sponsoredByUser(d, alice), 3);
+    }
+
+    function test_sponsor_winningsGoToJoinersOnly() public {
+        uint256 d = jackpot.currentDrawingId();
+        _join(bob, 1);
+        _sponsor(alice, 9);
+
+        uint256 staked = _makeWinners(d, 10, 100e6); // every ticket wins 100
+        _rollover();
+        _drainCursor(d);
+        assertEq(pool.pot(d), staked, "the pot must include the sponsored tickets' winnings");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        vm.prank(bob);
+        pool.claim(ds);
+        vm.prank(alice);
+        pool.claim(ds);
+
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked, "the sole joiner takes the whole pot");
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 0, "the sponsor gets nothing when joiners exist");
+    }
+
+    function test_sponsor_repeatAccumulatesAndCountsOnce() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 2);
+        _sponsor(alice, 3);
+        (uint256 sponsoredTickets, uint256 sponsors) = pool.sponsorsOf(d);
+        assertEq(sponsoredTickets, 5);
+        assertEq(sponsors, 1, "the same sponsor must not be counted twice");
+    }
+
+    function test_sponsor_respectsCapAndPause() public {
+        // Read the cap BEFORE arming the cheatcodes: an inline `MAX_TICKETS_PER_JOIN()` call
+        // here is a staticcall that happens after `expectRevert`/`prank` are set, so it
+        // consumes them and the test asserts nothing about `sponsor` itself (see
+        // `test_join_oneOverCap_reverts`, same gotcha).
+        uint32 overCap = _cap() + 1;
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.InvalidTicketCount.selector);
+        pool.sponsor(overCap);
+
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.InvalidTicketCount.selector);
+        pool.sponsor(0);
+
+        pool.pause();
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.Paused.selector);
+        pool.sponsor(1);
+    }
+
+    /// @dev The revenue path. A sponsored buy must still route the referral wallet, and a silent
+    ///      drop is invisible in every other test — this is how the referral wallet earns its
+    ///      cut of the sale.
+    function test_sponsor_stillRoutesTheReferralWallet() public {
+        _sponsor(alice, 2);
+        address[] memory refs = rtb.getLastReferrers();
+        assertEq(refs.length, 1);
+        assertEq(refs[0], REFERRAL, "referral wallet present - this is the revenue path");
+    }
+
+    function test_sponsor_emitsSponsored() public {
+        uint256 d = jackpot.currentDrawingId();
+        vm.expectEmit(true, true, false, true, address(pool));
+        emit IFarpotPool.Sponsored(d, alice, 4);
+        _sponsor(alice, 4);
+    }
+}
+
+/*//////////////////////////////////////////////////////////////////////////////
                         ADVERSARIAL BUYER RESPONSES
 
   Megapot's ids are unique by construction, so a fork test can never produce any

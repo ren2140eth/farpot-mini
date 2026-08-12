@@ -82,6 +82,13 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
     mapping(uint256 => uint256) public override claimCursor;
     bool public override paused;
 
+    /// @dev Sponsored tickets are recorded in `ticketIds` like any other — the pool owns and
+    ///      claims them — but they are tracked SEPARATELY from `totalTickets` because
+    ///      `totalTickets` is the payout denominator and sponsors take no share of it.
+    mapping(uint256 => mapping(address => uint256)) public override sponsoredByUser;
+    mapping(uint256 => uint256) public override totalSponsored;
+    mapping(uint256 => uint256) public override sponsorCount;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -137,6 +144,17 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         totalTickets[d] += tickets;
 
         emit Joined(d, msg.sender, tickets, tickets);
+    }
+
+    /// @inheritdoc IFarpotPool
+    function sponsor(uint32 tickets) external override nonReentrant {
+        uint256 d = _buyAndRecord(tickets);
+
+        if (sponsoredByUser[d][msg.sender] == 0) ++sponsorCount[d];
+        sponsoredByUser[d][msg.sender] += tickets;
+        totalSponsored[d] += tickets;
+
+        emit Sponsored(d, msg.sender, tickets);
     }
 
     /// @notice Buy `tickets` for the pool and record every minted id against its drawing.
@@ -331,6 +349,11 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
             claimCursor[drawingId],
             ticketIds[drawingId].length
         );
+    }
+
+    /// @inheritdoc IFarpotPool
+    function sponsorsOf(uint256 drawingId) external view override returns (uint256 tickets, uint256 sponsors) {
+        return (totalSponsored[drawingId], sponsorCount[drawingId]);
     }
 
     /// @inheritdoc IFarpotPool

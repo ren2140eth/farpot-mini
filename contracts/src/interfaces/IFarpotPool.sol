@@ -117,6 +117,12 @@ interface IFarpotPool {
     /// @notice Joins were paused or unpaused. Never affects `claimBatch` or `claim`.
     event PausedSet(bool paused);
 
+    /// @notice A sponsor bought tickets FOR the pool, taking no payout weight for them.
+    /// @dev No `mintedCount` field, unlike `Joined`: `_buyAndRecord` reverts with
+    ///      `MintCountMismatch` unless the mint count equals `tickets`, so a second field
+    ///      would carry no information.
+    event Sponsored(uint256 indexed drawingId, address indexed sponsor, uint256 tickets);
+
     /*//////////////////////////////////////////////////////////////
                             CONSTANTS & DEPS
     //////////////////////////////////////////////////////////////*/
@@ -151,6 +157,15 @@ interface IFarpotPool {
     function totalTickets(uint256 drawingId) external view returns (uint256);
     function contributorCount(uint256 drawingId) external view returns (uint256);
 
+    /// @notice Tickets `who` has sponsored for `drawingId`. Never payout weight.
+    function sponsoredByUser(uint256 drawingId, address who) external view returns (uint256);
+
+    /// @notice Sponsored tickets for `drawingId`. Deliberately NOT part of `totalTickets`.
+    function totalSponsored(uint256 drawingId) external view returns (uint256);
+
+    /// @notice Distinct sponsors for `drawingId`.
+    function sponsorCount(uint256 drawingId) external view returns (uint256);
+
     /// @notice USDC collected for a drawing, accumulated from measured deltas only.
     function pot(uint256 drawingId) external view returns (uint256);
 
@@ -171,6 +186,11 @@ interface IFarpotPool {
     ///      contribution and needs no refund path at all. If the Megapot buy reverts, the
     ///      whole join reverts and the joiner keeps their USDC.
     function join(uint32 tickets) external;
+
+    /// @notice Buy `tickets` FOR the pool without taking payout weight for them.
+    /// @dev The winnings of these tickets divide among the drawing's joiners. If the drawing
+    ///      ends with no joiners at all, `claim` pays the sponsors instead — see `claim`.
+    function sponsor(uint32 tickets) external;
 
     /// @notice Permissionless. Claim up to `count` of a settled drawing's tickets into its pot.
     /// @dev Not blocked by `paused`: contributors must always be able to recover winnings
@@ -212,6 +232,9 @@ interface IFarpotPool {
         external
         view
         returns (uint256 tickets, uint256 owed, bool hasClaimed);
+
+    /// @notice Sponsored totals for `drawingId`, in one read.
+    function sponsorsOf(uint256 drawingId) external view returns (uint256 tickets, uint256 sponsors);
 
     /*//////////////////////////////////////////////////////////////
                                   OWNER
