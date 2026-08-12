@@ -130,6 +130,21 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
 
     /// @inheritdoc IFarpotPool
     function join(uint32 tickets) external override nonReentrant {
+        uint256 d = _buyAndRecord(tickets);
+
+        if (ticketsByUser[d][msg.sender] == 0) ++contributorCount[d];
+        ticketsByUser[d][msg.sender] += tickets;
+        totalTickets[d] += tickets;
+
+        emit Joined(d, msg.sender, tickets, tickets);
+    }
+
+    /// @notice Buy `tickets` for the pool and record every minted id against its drawing.
+    /// @return d The drawing the tickets belong to, derived FROM THE TICKETS.
+    /// @dev Shared by `join` and `sponsor`. It records ticket OWNERSHIP only and credits no
+    ///      weight — the callers decide whether the buyer gets payout weight, and that
+    ///      difference is the entire sponsor feature.
+    function _buyAndRecord(uint32 tickets) internal returns (uint256 d) {
         if (paused) revert Paused();
         if (tickets == 0 || tickets > MAX_TICKETS_PER_JOIN) revert InvalidTicketCount();
 
@@ -162,7 +177,7 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         // Authoritative: the drawing comes FROM THE TICKETS, not from a separately-read
         // `currentDrawingId()`, so a rollover landing between the two reads cannot
         // misattribute this join.
-        uint256 d = ticketNft.getTicketInfo(ids[0]).drawingId;
+        d = ticketNft.getTicketInfo(ids[0]).drawingId;
 
         // Validate and record in ONE pass, per id.
         //
@@ -184,12 +199,6 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
             recordedTicket[id] = true;
             ticketIds[d].push(id);
         }
-
-        if (ticketsByUser[d][msg.sender] == 0) ++contributorCount[d];
-        ticketsByUser[d][msg.sender] += tickets;
-        totalTickets[d] += tickets;
-
-        emit Joined(d, msg.sender, tickets, ids.length);
     }
 
     /*//////////////////////////////////////////////////////////////
