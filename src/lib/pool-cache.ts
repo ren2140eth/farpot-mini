@@ -66,6 +66,9 @@ const frozenKey = (drawingId: bigint) => `mm:pool:${V}:frozen:${drawingId}`;
 // Sponsors are stored SEPARATELY from contributors and deliberately do NOT feed `mineKey` — see
 // `addSponsors` below.
 const sponsorsKey = (drawingId: bigint) => `mm:pool:${V}:sponsors:${drawingId}`;
+// Reverse index for sponsors, mirroring `mineKey` exactly but under its OWN key so it never
+// merges with the joiner reverse index — see `addSponsorDrawings` below.
+const sponsorMineKey = (address: string) => `mm:pool:${V}:sponsormine:${address.toLowerCase()}`;
 
 // ── cron crank + monitoring state (Phase 9) ────────────────────────────────────────────────
 // Lowest drawing id not yet known to be fully drained. Purely a "where to start looking" hint:
@@ -178,6 +181,38 @@ export async function addSponsors(drawingId: bigint, addresses: string[]): Promi
 
 export async function getSponsors(drawingId: bigint): Promise<string[]> {
   return (await client().smembers<string[]>(sponsorsKey(drawingId))) ?? [];
+}
+
+/**
+ * Record which drawings a wallet has sponsored. Mirrors `addContributorDrawings` exactly — same
+ * commands, same lowercasing, same null handling — under the SEPARATE `sponsorMineKey`, so a
+ * sponsor-only drawing can never be discovered through the joiner reverse index (`mineKey`) and
+ * render as a joiner row that pays zero. See `addSponsors` above for why the forward indexes are
+ * split the same way.
+ *
+ * Exists for the same reachability reason as `addContributorDrawings`: without it, a sponsor-only
+ * drawing older than the recent lookback window is undiscoverable, and the zero-joiner fallback
+ * `sponsorShareOf` pays out is unreachable from the UI even though `claim()` has no expiry.
+ */
+export async function addSponsorDrawings(address: string, drawingIds: bigint[]): Promise<void> {
+  if (drawingIds.length === 0) return;
+  const members = drawingIds.map((d) => d.toString());
+  await client().sadd(sponsorMineKey(address), members[0], ...members.slice(1));
+}
+
+/** Every drawing this wallet has sponsored, oldest-first ordering not guaranteed. */
+export async function getSponsorDrawings(address: string): Promise<bigint[]> {
+  const raw = (await client().smembers<string[]>(sponsorMineKey(address))) ?? [];
+  return raw
+    .map((d) => {
+      try {
+        return BigInt(d);
+      } catch {
+        return null;
+      }
+    })
+    .filter((d): d is bigint => d !== null)
+    .sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
 }
 
 /**

@@ -938,6 +938,7 @@ export default function Home() {
   const [contributors, setContributors] = useState<PoolContributor[]>([]);
   const [contributorsDegraded, setContributorsDegraded] = useState(false);
   const [yourPoolDrawings, setYourPoolDrawings] = useState<bigint[]>([]);
+  const [yourSponsoredDrawings, setYourSponsoredDrawings] = useState<bigint[]>([]);
   const [poolClaimError, setPoolClaimError] = useState("");
   const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
 
@@ -1083,11 +1084,15 @@ export default function Home() {
         setYourPoolDrawings(
           ((body.yourDrawings ?? []) as string[]).map((d) => BigInt(d)),
         );
+        setYourSponsoredDrawings(
+          ((body.yourSponsoredDrawings ?? []) as string[]).map((d) => BigInt(d)),
+        );
       } catch {
         if (cancelled) return;
         setContributors([]);
         setContributorsDegraded(true);
         setYourPoolDrawings([]);
+        setYourSponsoredDrawings([]);
       }
     })();
     return () => {
@@ -1275,16 +1280,26 @@ export default function Home() {
       lookback: POOL_HISTORY_LOOKBACK,
     });
     const seen = new Set(recent.map((d) => d.toString()));
-    const older = yourPoolDrawings.filter(
-      (d) => d < currentDrawingId && !seen.has(d.toString()),
-    );
+    // Union the joiner and sponsor reverse indexes, deduping across both — a drawing this
+    // wallet both joined and sponsored must only appear once in this id list (it renders as a
+    // single joiner row below; see mySponsoredPools).
+    const older: bigint[] = [];
+    for (const d of [...yourPoolDrawings, ...yourSponsoredDrawings]) {
+      const key = d.toString();
+      if (d < currentDrawingId && !seen.has(key)) {
+        seen.add(key);
+        older.push(d);
+      }
+    }
     // Newest first across both sources.
     return [...recent, ...older].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
-  }, [currentDrawingId, yourPoolDrawings]);
+  }, [currentDrawingId, yourPoolDrawings, yourSponsoredDrawings]);
 
-  // Two entries per drawing, one multicall. `shareOf` carries the user's weight, what they are
-  // owed and whether they already claimed; `poolStateOf` gates whether the figure may be shown
-  // at all.
+  // Three entries per drawing, one multicall. `shareOf` carries the user's joiner weight, what
+  // they are owed and whether they already claimed; `poolStateOf` gates whether either figure
+  // may be shown at all; `sponsorShareOf` carries the same triple for the zero-joiner sponsor
+  // fallback (Task 11B). Every index below MUST stay `i * 3` / `i * 3 + 1` / `i * 3 + 2` — an
+  // off-by-one here silently pairs one drawing's read with another's.
   const { data: pastPoolReads, refetch: refetchPastPools } = useReadContracts({
     contracts: pastDrawingIds.flatMap((d) => [
       {
@@ -1298,6 +1313,12 @@ export default function Home() {
         abi: FARPOT_POOL_ABI,
         functionName: "poolStateOf" as const,
         args: [d] as const,
+      },
+      {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "sponsorShareOf" as const,
+        args: [d, address as `0x${string}`] as const,
       },
     ]),
     query: {
@@ -1316,13 +1337,50 @@ export default function Home() {
       state: number;
     }[] = [];
     pastDrawingIds.forEach((drawingId, i) => {
-      const share = pastPoolReads[i * 2];
-      const state = pastPoolReads[i * 2 + 1];
+      const share = pastPoolReads[i * 3];
+      const state = pastPoolReads[i * 3 + 1];
       // A failed read is skipped rather than rendered as a zero — showing "you won $0" because
       // an RPC call failed is worse than showing nothing.
       if (share?.status !== "success" || state?.status !== "success") return;
       const [tickets, owed, hasClaimed] = share.result as readonly [bigint, bigint, boolean];
       if (tickets === BigInt(0)) return; // never joined this drawing
+      out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
+    });
+    return out;
+  }, [pastPoolReads, pastDrawingIds]);
+
+  // Sponsor rows: a drawing this wallet sponsored. A row qualifies ONLY when this wallet's
+  // OWN `shareOf.tickets` is zero — a drawing the wallet both joined and sponsored already
+  // renders above as a joiner row, and `totalTickets != 0` there by construction means
+  // `sponsorShareOf.owed` is zero anyway (see Task 11B brief: showing both would imply two
+  // payouts for one drawing).
+  const mySponsoredPools = useMemo(() => {
+    if (!pastPoolReads) return [];
+    const out: {
+      drawingId: bigint;
+      tickets: bigint;
+      owed: bigint;
+      hasClaimed: boolean;
+      state: number;
+    }[] = [];
+    pastDrawingIds.forEach((drawingId, i) => {
+      const share = pastPoolReads[i * 3];
+      const state = pastPoolReads[i * 3 + 1];
+      const sponsorShare = pastPoolReads[i * 3 + 2];
+      if (
+        share?.status !== "success" ||
+        state?.status !== "success" ||
+        sponsorShare?.status !== "success"
+      )
+        return;
+      const [joinerTickets] = share.result as readonly [bigint, bigint, boolean];
+      if (joinerTickets !== BigInt(0)) return; // renders as a joiner row instead
+      const [tickets, owed, hasClaimed] = sponsorShare.result as readonly [
+        bigint,
+        bigint,
+        boolean,
+      ];
+      if (tickets === BigInt(0)) return; // never sponsored this drawing
       out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
     });
     return out;
@@ -3326,67 +3384,150 @@ export default function Home() {
           {/* Your past pools — the claim path.
               A Claimable pool must NOT show a payout figure: shareOf reports only the pot
               collected so far while claimBatch is still draining, so a number here would be
-              wrong and would then change under the user. Only Settled is final. */}
-          {isConnected && myPastPools.length > 0 && (
-            <div>
-              <h3 className="text-white font-heading font-extrabold text-sm mb-2">Your past pools</h3>
-              <div className="space-y-2">
-                {myPastPools.map((p) => (
-                  <div
-                    key={p.drawingId.toString()}
-                    className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
-                  >
-                    <div>
-                      <p className="text-white font-heading font-bold text-sm">
-                        Draw #{p.drawingId.toString()}
-                      </p>
-                      <p className="pool-dimmer text-xs">
-                        {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
-                      </p>
-                    </div>
+              wrong and would then change under the user. Only Settled is final.
 
-                    {(() => {
-                      const row = poolRowState(p);
-                      switch (row.kind) {
-                        case "settling":
-                          return (
-                            <span className="pool-dim text-xs font-heading font-bold">
-                              Settling…
-                            </span>
-                          );
-                        case "pending":
-                          return <span className="pool-dimmer text-xs">—</span>;
-                        case "claimed":
-                          return (
-                            <span className="text-wins-green text-xs font-heading font-bold">
-                              ✓ claimed
-                            </span>
-                          );
-                        case "claimable":
-                          return (
-                            <button
-                              onClick={() => handleClaimPool(p.drawingId)}
-                              disabled={claimingDrawing === p.drawingId}
-                              className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
-                            >
-                              {claimingDrawing === p.drawingId
-                                ? "Claiming…"
-                                : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
-                            </button>
-                          );
-                        default:
-                          /* Settled with nothing owed: the pool's tickets did not win. Say so
-                             plainly rather than showing a $0.00 claim button. */
-                          return (
-                            <span className="pool-dimmer text-xs font-heading font-bold">
-                              No win this draw
-                            </span>
-                          );
-                      }
-                    })()}
+              Two SEPARATE lists render here, never merged: `myPastPools` (joiner rows, from
+              `shareOf`) and `mySponsoredPools` (sponsor rows, from `sponsorShareOf` — Task
+              11B, the zero-joiner fallback). Keeping them apart mirrors the on-chain split:
+              a joiner row can show a real payout at any time; a sponsor row's `owed` is
+              non-zero only on the rare drawing nobody joined, and merging the two would make
+              that distinction invisible in the UI. `handleClaimPool`/`claimingDrawing` are
+              shared — `claim(uint256[])` is class-agnostic on-chain, it just needs the row
+              plumbing to reach it. */}
+          {isConnected && (myPastPools.length > 0 || mySponsoredPools.length > 0) && (
+            <div className="space-y-4">
+              {myPastPools.length > 0 && (
+                <div>
+                  <h3 className="text-white font-heading font-extrabold text-sm mb-2">
+                    Your past pools
+                  </h3>
+                  <div className="space-y-2">
+                    {myPastPools.map((p) => (
+                      <div
+                        key={p.drawingId.toString()}
+                        className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <p className="text-white font-heading font-bold text-sm">
+                            Draw #{p.drawingId.toString()}
+                          </p>
+                          <p className="pool-dimmer text-xs">
+                            {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
+                          </p>
+                        </div>
+
+                        {(() => {
+                          const row = poolRowState(p);
+                          switch (row.kind) {
+                            case "settling":
+                              return (
+                                <span className="pool-dim text-xs font-heading font-bold">
+                                  Settling…
+                                </span>
+                              );
+                            case "pending":
+                              return <span className="pool-dimmer text-xs">—</span>;
+                            case "claimed":
+                              return (
+                                <span className="text-wins-green text-xs font-heading font-bold">
+                                  ✓ claimed
+                                </span>
+                              );
+                            case "claimable":
+                              return (
+                                <button
+                                  onClick={() => handleClaimPool(p.drawingId)}
+                                  disabled={claimingDrawing === p.drawingId}
+                                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
+                                >
+                                  {claimingDrawing === p.drawingId
+                                    ? "Claiming…"
+                                    : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
+                                </button>
+                              );
+                            default:
+                              /* Settled with nothing owed: the pool's tickets did not win. Say
+                                 so plainly rather than showing a $0.00 claim button. */
+                              return (
+                                <span className="pool-dimmer text-xs font-heading font-bold">
+                                  No win this draw
+                                </span>
+                              );
+                          }
+                        })()}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
+
+              {mySponsoredPools.length > 0 && (
+                <div>
+                  <h3 className="text-white font-heading font-extrabold text-sm mb-2">
+                    Your sponsorships
+                  </h3>
+                  <div className="space-y-2">
+                    {mySponsoredPools.map((p) => (
+                      <div
+                        key={p.drawingId.toString()}
+                        className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <p className="text-white font-heading font-bold text-sm">
+                            Draw #{p.drawingId.toString()}
+                          </p>
+                          <p className="pool-dimmer text-xs">
+                            {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"}{" "}
+                            sponsored
+                          </p>
+                        </div>
+
+                        {(() => {
+                          const row = poolRowState(p);
+                          switch (row.kind) {
+                            case "settling":
+                              return (
+                                <span className="pool-dim text-xs font-heading font-bold">
+                                  Settling…
+                                </span>
+                              );
+                            case "pending":
+                              return <span className="pool-dimmer text-xs">—</span>;
+                            case "claimed":
+                              return (
+                                <span className="text-wins-green text-xs font-heading font-bold">
+                                  ✓ claimed
+                                </span>
+                              );
+                            case "claimable":
+                              return (
+                                <button
+                                  onClick={() => handleClaimPool(p.drawingId)}
+                                  disabled={claimingDrawing === p.drawingId}
+                                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
+                                >
+                                  {claimingDrawing === p.drawingId
+                                    ? "Claiming…"
+                                    : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
+                                </button>
+                              );
+                            default:
+                              /* Settled with nothing owed: this drawing had a joiner (the
+                                 fallback never triggered), so the sponsorship correctly earns
+                                 no separate payout beyond the pot it contributed to. */
+                              return (
+                                <span className="pool-dimmer text-xs font-heading font-bold">
+                                  No win this draw
+                                </span>
+                              );
+                          }
+                        })()}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {poolClaimError && <p className="text-coral text-sm mt-2">{poolClaimError}</p>}
             </div>
           )}

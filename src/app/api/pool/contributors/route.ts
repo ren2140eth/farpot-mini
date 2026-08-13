@@ -24,11 +24,13 @@ import {
   addContributors,
   addContributorDrawings,
   addSponsors,
+  addSponsorDrawings,
   getContributorDrawings,
   cacheEnabled,
   freezeDrawing,
   getContributors,
   getCursor,
+  getSponsorDrawings,
   getSponsors,
   isFrozen,
   releaseLock,
@@ -108,12 +110,14 @@ async function scan(confirmedHead: bigint): Promise<void> {
       toBlock: to,
     });
 
-    // Three indexes off one pass: drawing → joiner addresses (the "who's in" row), address →
-    // drawings (the claim history), and drawing → sponsor addresses. Deriving all three here
-    // means they cannot drift apart, and the extra indexes cost no extra RPC.
+    // Four indexes off one pass: drawing → joiner addresses (the "who's in" row), address →
+    // joined drawings (the joiner claim history), drawing → sponsor addresses, and address →
+    // sponsored drawings (the sponsor claim history — Task 11B). Deriving all four here means
+    // they cannot drift apart, and the extra indexes cost no extra RPC.
     const byDrawing = new Map<bigint, Set<string>>();
     const byAddress = new Map<string, Set<bigint>>();
     const sponsorsByDrawing = new Map<bigint, Set<string>>();
+    const sponsorsByAddress = new Map<string, Set<bigint>>();
     for (const log of logs) {
       const eventName = (log as { eventName?: string }).eventName;
       if (eventName === "Joined") {
@@ -133,11 +137,17 @@ async function scan(confirmedHead: bigint): Promise<void> {
         const set = sponsorsByDrawing.get(args.drawingId) ?? new Set<string>();
         set.add(who);
         sponsorsByDrawing.set(args.drawingId, set);
+        const drawings = sponsorsByAddress.get(who) ?? new Set<bigint>();
+        drawings.add(args.drawingId);
+        sponsorsByAddress.set(who, drawings);
       }
     }
 
     // All indexes FIRST, cursor LAST. A crash between them re-scans this chunk, which is
-    // idempotent; the opposite order would skip it and lose those records for good.
+    // idempotent; the opposite order would skip it and lose those records for good. Each
+    // reverse-index write sits directly after its own forward-index write, mirroring the
+    // Joined pair (addContributors → addContributorDrawings) with the Sponsored pair
+    // (addSponsors → addSponsorDrawings).
     for (const [drawingId, addresses] of byDrawing) {
       await addContributors(drawingId, [...addresses]);
     }
@@ -146,6 +156,9 @@ async function scan(confirmedHead: bigint): Promise<void> {
     }
     for (const [drawingId, addresses] of sponsorsByDrawing) {
       await addSponsors(drawingId, [...addresses]);
+    }
+    for (const [who, drawings] of sponsorsByAddress) {
+      await addSponsorDrawings(who, [...drawings]);
     }
     await setCursor(to);
 
@@ -261,6 +274,12 @@ export async function GET(request: Request) {
     const yourDrawings = forAddress
       ? (await getContributorDrawings(forAddress)).map((d) => d.toString())
       : [];
+    // Same no-expiry reasoning as `yourDrawings`, for the sponsor class — Task 11B. Without
+    // this a sponsor-only drawing older than the recent window is undiscoverable even though
+    // `sponsorShareOf`'s fallback payout never expires on-chain.
+    const yourSponsoredDrawings = forAddress
+      ? (await getSponsorDrawings(forAddress)).map((d) => d.toString())
+      : [];
 
     const addresses = await getContributors(drawingId);
     const sponsorAddresses = await getSponsors(drawingId);
@@ -360,7 +379,14 @@ export async function GET(request: Request) {
     }
 
     return NextResponse.json(
-      { drawingId: drawingId.toString(), contributors, sponsors, yourDrawings, degraded: false },
+      {
+        drawingId: drawingId.toString(),
+        contributors,
+        sponsors,
+        yourDrawings,
+        yourSponsoredDrawings,
+        degraded: false,
+      },
       { headers: { "cache-control": `s-maxage=${REVALIDATE_SECONDS}, stale-while-revalidate` } },
     );
   } catch (err) {
@@ -385,6 +411,7 @@ function degraded(drawingId: bigint) {
       contributors: [],
       sponsors: [],
       yourDrawings: [],
+      yourSponsoredDrawings: [],
       degraded: true,
     },
     { headers: { "cache-control": "no-store" } },
