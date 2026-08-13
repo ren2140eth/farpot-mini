@@ -82,6 +82,13 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
     mapping(uint256 => uint256) public override claimCursor;
     bool public override paused;
 
+    /// @dev Sponsored tickets are recorded in `ticketIds` like any other — the pool owns and
+    ///      claims them — but they are tracked SEPARATELY from `totalTickets` because
+    ///      `totalTickets` is the payout denominator and sponsors take no share of it.
+    mapping(uint256 => mapping(address => uint256)) public override sponsoredByUser;
+    mapping(uint256 => uint256) public override totalSponsored;
+    mapping(uint256 => uint256) public override sponsorCount;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -115,6 +122,12 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         usdc = _usdc;
         referralWallet = _ref;
 
+        // Deployed PAUSED, deliberately. A live-on-deploy pool can accumulate a rival pool for
+        // the current drawing during a migration, before the old pool is paused and the
+        // frontend switched — two contributor sets, two pots and two crank obligations for one
+        // drawing. `pause()` never blocks claims, so this cannot strand anything.
+        paused = true;
+
         _initializeOwner(msg.sender);
     }
 
@@ -124,6 +137,32 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
 
     /// @inheritdoc IFarpotPool
     function join(uint32 tickets) external override nonReentrant {
+        uint256 d = _buyAndRecord(tickets);
+
+        if (ticketsByUser[d][msg.sender] == 0) ++contributorCount[d];
+        ticketsByUser[d][msg.sender] += tickets;
+        totalTickets[d] += tickets;
+
+        emit Joined(d, msg.sender, tickets, tickets);
+    }
+
+    /// @inheritdoc IFarpotPool
+    function sponsor(uint32 tickets) external override nonReentrant {
+        uint256 d = _buyAndRecord(tickets);
+
+        if (sponsoredByUser[d][msg.sender] == 0) ++sponsorCount[d];
+        sponsoredByUser[d][msg.sender] += tickets;
+        totalSponsored[d] += tickets;
+
+        emit Sponsored(d, msg.sender, tickets);
+    }
+
+    /// @notice Buy `tickets` for the pool and record every minted id against its drawing.
+    /// @return d The drawing the tickets belong to, derived FROM THE TICKETS.
+    /// @dev Shared by `join` and `sponsor`. It records ticket OWNERSHIP only and credits no
+    ///      weight — the callers decide whether the buyer gets payout weight, and that
+    ///      difference is the entire sponsor feature.
+    function _buyAndRecord(uint32 tickets) internal returns (uint256 d) {
         if (paused) revert Paused();
         if (tickets == 0 || tickets > MAX_TICKETS_PER_JOIN) revert InvalidTicketCount();
 
@@ -156,7 +195,7 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         // Authoritative: the drawing comes FROM THE TICKETS, not from a separately-read
         // `currentDrawingId()`, so a rollover landing between the two reads cannot
         // misattribute this join.
-        uint256 d = ticketNft.getTicketInfo(ids[0]).drawingId;
+        d = ticketNft.getTicketInfo(ids[0]).drawingId;
 
         // Validate and record in ONE pass, per id.
         //
@@ -178,12 +217,6 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
             recordedTicket[id] = true;
             ticketIds[d].push(id);
         }
-
-        if (ticketsByUser[d][msg.sender] == 0) ++contributorCount[d];
-        ticketsByUser[d][msg.sender] += tickets;
-        totalTickets[d] += tickets;
-
-        emit Joined(d, msg.sender, tickets, ids.length);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -254,7 +287,21 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
 
             // Duplicate ids in one call are a no-op after the first, not a double payout.
             if (claimed[d][msg.sender]) continue;
-            uint256 w = ticketsByUser[d][msg.sender];
+
+            // Class selection, and the ONLY place the fallback exists. A drawing with no
+            // joiner weight would otherwise have an undistributable pot: its sponsors get
+            // their own tickets' winnings back, split by sponsored weight. The gift returns
+            // only if nobody took it.
+            uint256 total = totalTickets[d];
+            uint256 w;
+            uint256 denom;
+            if (total == 0) {
+                w = sponsoredByUser[d][msg.sender];
+                denom = totalSponsored[d];
+            } else {
+                w = ticketsByUser[d][msg.sender];
+                denom = total;
+            }
             if (w == 0) continue;
 
             // The weight is NEVER zeroed, so historical participation stays readable from
@@ -262,8 +309,9 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
             claimed[d][msg.sender] = true;
 
             // Floor, via the full 512-bit product: the naive `pot * w / total` reverts on
-            // overflow, which would strand a pot permanently.
-            uint256 amount = FixedPointMathLib.fullMulDiv(pot[d], w, totalTickets[d]);
+            // overflow, which would strand a pot permanently. `denom` cannot be zero here —
+            // `w != 0` implies its own class total is non-zero.
+            uint256 amount = FixedPointMathLib.fullMulDiv(pot[d], w, denom);
             owed += amount;
 
             emit Claimed(d, msg.sender, amount);
@@ -319,6 +367,11 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
     }
 
     /// @inheritdoc IFarpotPool
+    function sponsorsOf(uint256 drawingId) external view override returns (uint256 tickets, uint256 sponsors) {
+        return (totalSponsored[drawingId], sponsorCount[drawingId]);
+    }
+
+    /// @inheritdoc IFarpotPool
     function shareOf(uint256 drawingId, address who)
         external
         view
@@ -332,6 +385,23 @@ contract FarpotPool is IFarpotPool, Ownable, ReentrancyGuard {
         // Guarded so a drawing with no participants returns 0 rather than dividing by zero.
         if (!hasClaimed && total != 0) {
             owed = FixedPointMathLib.fullMulDiv(pot[drawingId], tickets, total);
+        }
+    }
+
+    /// @inheritdoc IFarpotPool
+    function sponsorShareOf(uint256 drawingId, address who)
+        external
+        view
+        override
+        returns (uint256 tickets, uint256 owed, bool hasClaimed)
+    {
+        tickets = sponsoredByUser[drawingId][who];
+        hasClaimed = claimed[drawingId][who];
+
+        // Non-zero ONLY in the fallback: any joiner weight at all means sponsors are owed zero.
+        uint256 sponsored = totalSponsored[drawingId];
+        if (!hasClaimed && totalTickets[drawingId] == 0 && sponsored != 0) {
+            owed = FixedPointMathLib.fullMulDiv(pot[drawingId], tickets, sponsored);
         }
     }
 

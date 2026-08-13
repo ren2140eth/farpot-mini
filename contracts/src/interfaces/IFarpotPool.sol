@@ -117,6 +117,12 @@ interface IFarpotPool {
     /// @notice Joins were paused or unpaused. Never affects `claimBatch` or `claim`.
     event PausedSet(bool paused);
 
+    /// @notice A sponsor bought tickets FOR the pool, taking no payout weight for them.
+    /// @dev No `mintedCount` field, unlike `Joined`: `_buyAndRecord` reverts with
+    ///      `MintCountMismatch` unless the mint count equals `tickets`, so a second field
+    ///      would carry no information.
+    event Sponsored(uint256 indexed drawingId, address indexed sponsor, uint256 tickets);
+
     /*//////////////////////////////////////////////////////////////
                             CONSTANTS & DEPS
     //////////////////////////////////////////////////////////////*/
@@ -151,6 +157,15 @@ interface IFarpotPool {
     function totalTickets(uint256 drawingId) external view returns (uint256);
     function contributorCount(uint256 drawingId) external view returns (uint256);
 
+    /// @notice Tickets `who` has sponsored for `drawingId`. Never payout weight.
+    function sponsoredByUser(uint256 drawingId, address who) external view returns (uint256);
+
+    /// @notice Sponsored tickets for `drawingId`. Deliberately NOT part of `totalTickets`.
+    function totalSponsored(uint256 drawingId) external view returns (uint256);
+
+    /// @notice Distinct sponsors for `drawingId`.
+    function sponsorCount(uint256 drawingId) external view returns (uint256);
+
     /// @notice USDC collected for a drawing, accumulated from measured deltas only.
     function pot(uint256 drawingId) external view returns (uint256);
 
@@ -172,6 +187,11 @@ interface IFarpotPool {
     ///      whole join reverts and the joiner keeps their USDC.
     function join(uint32 tickets) external;
 
+    /// @notice Buy `tickets` FOR the pool without taking payout weight for them.
+    /// @dev The winnings of these tickets divide among the drawing's joiners. If the drawing
+    ///      ends with no joiners at all, `claim` pays the sponsors instead — see `claim`.
+    function sponsor(uint32 tickets) external;
+
     /// @notice Permissionless. Claim up to `count` of a settled drawing's tickets into its pot.
     /// @dev Not blocked by `paused`: contributors must always be able to recover winnings
     ///      from drawings already bought, including during an upstream incident.
@@ -180,6 +200,16 @@ interface IFarpotPool {
     /// @notice Take your pro-rata share of each fully-settled drawing in `drawingIds`.
     /// @dev Duplicate ids within one call pay once. A zero entitlement is a no-op, not a
     ///      revert. Not blocked by `paused`.
+    ///
+    ///      Claimant-class flip: a drawing's joiners are its claimants UNLESS the drawing
+    ///      ended with no joiner weight at all (`totalTickets == 0`), in which case its
+    ///      SPONSORS become the claimants instead, splitting the drawing's own pot by
+    ///      sponsored weight (`sponsoredByUser` / `totalSponsored`) rather than joiner weight.
+    ///      This is a per-drawing, per-call decision — each id in `drawingIds` is evaluated
+    ///      independently, so one call can pay one drawing via the joiner class and another
+    ///      via the sponsor fallback. There is no third class and no partial credit across
+    ///      classes: a wallet that both joined and sponsored the SAME drawing is paid only as
+    ///      a joiner, because `totalTickets != 0` in that case by construction.
     function claim(uint256[] calldata drawingIds) external;
 
     /*//////////////////////////////////////////////////////////////
@@ -190,6 +220,9 @@ interface IFarpotPool {
     ///         one state, and no value can go stale because nothing is stored.
     function poolStateOf(uint256 drawingId) external view returns (PoolState);
 
+    /// @dev `tickets` (field 1) is **joiner weight only**; `ticketCount` (field 6) is **every
+    ///      ticket the pool owns**, sponsored included. Consumers that walk tickets to claim
+    ///      want field 6; consumers that reason about payout weight want field 1.
     function poolOf(uint256 drawingId)
         external
         view
@@ -208,7 +241,29 @@ interface IFarpotPool {
     ///         floor entitlement once `Settled`; zero again once claimed. The UI must show a
     ///         payout figure ONLY when `poolStateOf == Settled`.
     /// @return hasClaimed Whether this contributor has already taken their share.
+    /// @dev `hasClaimed` is shared with `sponsorShareOf` — the two claimant classes are
+    ///      mutually exclusive per drawing.
     function shareOf(uint256 drawingId, address who)
+        external
+        view
+        returns (uint256 tickets, uint256 owed, bool hasClaimed);
+
+    /// @notice Sponsored totals for `drawingId`, in one read.
+    function sponsorsOf(uint256 drawingId) external view returns (uint256 tickets, uint256 sponsors);
+
+    /// @notice A sponsor's position in `drawingId`.
+    /// @return tickets Always the immutable historical sponsored weight, retained after
+    ///         claiming.
+    /// @return owed Non-zero ONLY when the drawing ended with no joiner weight at all — the
+    ///         zero-joiner fallback (see `claim`) — AND is otherwise subject to the exact same
+    ///         timing rule `shareOf.owed` documents: zero before settlement, a PARTIAL figure
+    ///         while the drawing is `Claimable` (because `pot` is still accumulating as
+    ///         `claimBatch` drains it), and the final floor entitlement only once `Settled`.
+    ///         The UI must show a payout figure ONLY when `poolStateOf == Settled`, same as
+    ///         the joiner path.
+    /// @return hasClaimed The SAME flag `shareOf` reports: the two claimant classes are
+    ///         mutually exclusive per drawing, so one flag serves both.
+    function sponsorShareOf(uint256 drawingId, address who)
         external
         view
         returns (uint256 tickets, uint256 owed, bool hasClaimed);

@@ -49,6 +49,8 @@ abstract contract PoolTestBase is Test {
         jackpot.setAuthorizedMinter(address(rtb), true);
 
         pool = new FarpotPool(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
+        // The pool deploys paused (see FarpotPool's constructor); tests exercise the live pool.
+        pool.unpause();
 
         _fund(alice);
         _fund(bob);
@@ -71,6 +73,11 @@ abstract contract PoolTestBase is Test {
     function _join(address who, uint32 n) internal {
         vm.prank(who);
         pool.join(n);
+    }
+
+    function _sponsor(address who, uint32 n) internal {
+        vm.prank(who);
+        pool.sponsor(n);
     }
 
     /// @notice Settle the current drawing and roll over — atomic upstream, one write here.

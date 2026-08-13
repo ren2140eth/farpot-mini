@@ -18,24 +18,35 @@ export const JACKPOT_TICKET_NFT_ADDRESS = "0x48FfE35AbB9f4780a4f1775C2Ce1c46185b
 export const REFERRAL_WALLET = "0xeEeC2d83DA24512D37410F7cA5B18FD805fB79d2" as const;
 
 // FarpotPool — the group-buy pool contract (contracts/src/FarpotPool.sol).
-// Deployed to Base 2026-08-03, source-verified on Sourcify with an EXACT match
-// (creation and runtime): https://repo.sourcify.dev/8453/0x0F28287571E0e81a4352594B6D2e46761A88D320
+// Deployed to Base 2026-08-13, source-verified on Sourcify with an EXACT match
+// (creation and runtime): https://repo.sourcify.dev/8453/0xfBE555a34066E10464f28ce9b46D862aD8031906
 // The owner's only power is pause()/unpause(), which blocks
 // join() alone — claimBatch() and claim() keep working while paused, so pausing can never
 // strand funds. All five constructor dependencies were read back off-chain and match the
 // addresses above.
-export const FARPOT_POOL_ADDRESS = "0x0F28287571E0e81a4352594B6D2e46761A88D320" as const;
+//
+// This REPLACES 0x0F28287571E0e81a4352594B6D2e46761A88D320, which had no sponsor surface
+// (`sponsorsOf` and `sponsorShareOf` revert on it). The old pool was drained and retired
+// first: drawings 141 and 142 both Settled with the claim cursor fully advanced, every
+// entitlement at zero, and only one atomic unit of `fullMulDiv` rounding dust left behind.
+//
+// Moving this address REQUIRES bumping `V` in pool-cache.ts in the SAME push. The cache keys
+// are namespaced by V, not by address, so a repoint without a bump would serve the old pool's
+// cached contributor lists under the new contract. It also resets the contributors route's
+// cold-rebuild window, which is measured from FARPOT_POOL_DEPLOY_BLOCK below.
+export const FARPOT_POOL_ADDRESS = "0xfBE555a34066E10464f28ce9b46D862aD8031906" as const;
 
 // The block FarpotPool was deployed in, taken from the transaction receipt
-// (0xc24b0dde…acb7ab). This is the cold-cache `fromBlock` for any Joined-log scan — never
+// (0xb52ec27c…6f71d). This is the cold-cache `fromBlock` for any Joined-log scan — never
 // use 0, which would scan the whole chain.
 //
 // Do NOT take this from the deploy script's console output: that line prints the block the
-// SIMULATION ran against (it said 49497965), while the transaction actually mined in 49497969.
-// `BigInt(…)` rather than a `49497969n` literal: tsconfig targets ES2017, which rejects
+// SIMULATION ran against (it said 49927142), while the transaction actually mined in 49927357.
+// The same trap caught the previous deploy, which simulated at 49497965 and mined in 49497969.
+// `BigInt(…)` rather than a `49927357n` literal: tsconfig targets ES2017, which rejects
 // BigInt literal syntax outright ("BigInt literals are not available when targeting lower
 // than ES2020"). The value is a bigint either way, which is what viem's `fromBlock` wants.
-export const FARPOT_POOL_DEPLOY_BLOCK = BigInt(49497969);
+export const FARPOT_POOL_DEPLOY_BLOCK = BigInt(49927357);
 
 // FarpotPool ABI — only what the app actually calls, transcribed from
 // contracts/src/interfaces/IFarpotPool.sol (the compiler-enforced surface).
@@ -81,6 +92,15 @@ export const FARPOT_POOL_ABI = [
   {
     inputs: [{ internalType: "uint256[]", name: "drawingIds", type: "uint256[]" }],
     name: "claim",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  // Buys tickets the pool owns and claims itself — credited to sponsoredByUser/totalSponsored/
+  // sponsorCount, NEVER to totalTickets. Sponsors take no payout weight; see sponsorShareOf.
+  {
+    inputs: [{ internalType: "uint32", name: "tickets", type: "uint32" }],
+    name: "sponsor",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -137,6 +157,42 @@ export const FARPOT_POOL_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [
+      { internalType: "uint256", name: "drawingId", type: "uint256" },
+      { internalType: "address", name: "who", type: "address" },
+    ],
+    name: "sponsoredByUser",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "drawingId", type: "uint256" }],
+    name: "sponsorsOf",
+    outputs: [
+      { internalType: "uint256", name: "tickets", type: "uint256" },
+      { internalType: "uint256", name: "sponsors", type: "uint256" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  // `owed` is non-zero ONLY when totalTickets[drawingId] === 0 — the zero-joiner fallback that
+  // pays sponsors instead. hasClaimed is shared with shareOf's claimant class.
+  {
+    inputs: [
+      { internalType: "uint256", name: "drawingId", type: "uint256" },
+      { internalType: "address", name: "who", type: "address" },
+    ],
+    name: "sponsorShareOf",
+    outputs: [
+      { internalType: "uint256", name: "tickets", type: "uint256" },
+      { internalType: "uint256", name: "owed", type: "uint256" },
+      { internalType: "bool", name: "hasClaimed", type: "bool" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
   // --- events ---
   // Both drawingId and contributor are indexed, so the contributor route filters the current
   // drawing by topic instead of scanning history.
@@ -162,6 +218,17 @@ export const FARPOT_POOL_ABI = [
       { indexed: false, internalType: "uint256", name: "cursor", type: "uint256" },
     ],
     name: "BatchClaimed",
+    type: "event",
+  },
+  // A sponsor bought tickets FOR the pool, taking no payout weight for them.
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: "uint256", name: "drawingId", type: "uint256" },
+      { indexed: true, internalType: "address", name: "sponsor", type: "address" },
+      { indexed: false, internalType: "uint256", name: "tickets", type: "uint256" },
+    ],
+    name: "Sponsored",
     type: "event",
   },
   // --- errors (for decoding reverts into friendly copy) ---
@@ -190,7 +257,12 @@ export const POOL_STATE = {
 // The drawing that was current when FarpotPool was deployed — the first one it could
 // possibly hold tickets for. Used as the floor when scanning back for a user's past pools,
 // so the lookback never queries drawings that predate the contract.
-export const POOL_FIRST_DRAWING = BigInt(133);
+//
+// 143 is the drawing current at the 2026-08-13 redeploy. The pool deploys PAUSED and is
+// unpaused only after the frontend is live, so its true first drawing could be later than
+// this if the cutover slips past a draw. That direction is deliberate: an over-inclusive
+// floor costs one wasted empty-drawing read, an under-inclusive one hides real tickets.
+export const POOL_FIRST_DRAWING = BigInt(143);
 
 // How many past drawings the Pool tab checks for an unclaimed share. Bounded because every
 // candidate costs two multicall entries. Megapot draws daily, so this is ~6 weeks of history.
@@ -205,6 +277,21 @@ export const POOL_HISTORY_LOOKBACK = 45;
 // therefore never promise a hard limit. It exists to bound the routine case until the audit,
 // and is expressed in USDC rather than tickets so it converts through the LIVE ticket price.
 export const POOL_SOFT_CAP_USDC = BigInt(500_000_000);
+
+// Soft-launch cap on SPONSORED value per drawing, in USDC (6 decimals) — $500.
+//
+// Deliberately a SEPARATE bucket from POOL_SOFT_CAP_USDC rather than a shared one: sharing
+// would mean a sponsorship crowds out the joiners it exists to attract. Worst case per drawing
+// is therefore $1000 across both. Joiner principal at risk is unchanged; the extra exposure is
+// the sponsor's own money plus the joiners' winnings from it.
+export const POOL_SPONSOR_SOFT_CAP_USDC = BigInt(500_000_000);
+
+// Minimum sponsored value to be billed in the pool hero — $10.
+//
+// "Largest sponsor wins" sets only a RELATIVE price: in an otherwise unsponsored drawing a
+// single $1 ticket would buy the banner. Anyone may still sponsor below this and is still
+// counted in the totals; they just do not get the headline. Display policy, not fund safety.
+export const POOL_SPONSOR_BILLING_MIN_USDC = BigInt(10_000_000);
 
 // Base chain ID
 export const BASE_CHAIN_ID = 8453;

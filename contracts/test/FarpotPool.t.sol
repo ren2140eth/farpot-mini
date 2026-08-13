@@ -155,6 +155,201 @@ contract FarpotPoolJoinTest is PoolTestBase {
 }
 
 /*//////////////////////////////////////////////////////////////////////////////
+                                   SPONSOR
+//////////////////////////////////////////////////////////////////////////////*/
+
+contract FarpotPoolSponsorTest is PoolTestBase {
+    function test_sponsor_recordsTicketsButNoWeight() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 3);
+
+        // The pool owns the tickets and will claim them...
+        assertEq(_poolOwnedTickets(d), 3, "pool must own the sponsored tickets");
+        (uint256 tickets, uint256 contributors,,,, uint256 ticketCount) = pool.poolOf(d);
+        assertEq(ticketCount, 3, "sponsored tickets are in the claim list");
+
+        // ...but the sponsor holds no payout weight and is not a contributor.
+        assertEq(tickets, 0, "totalTickets must stay joiner-only");
+        assertEq(contributors, 0, "a sponsor is not a contributor");
+        assertEq(pool.ticketsByUser(d, alice), 0, "a sponsor has no joiner weight");
+
+        (uint256 sponsoredTickets, uint256 sponsors) = pool.sponsorsOf(d);
+        assertEq(sponsoredTickets, 3);
+        assertEq(sponsors, 1);
+        assertEq(pool.sponsoredByUser(d, alice), 3);
+    }
+
+    function test_sponsor_winningsGoToJoinersOnly() public {
+        uint256 d = jackpot.currentDrawingId();
+        _join(bob, 1);
+        _sponsor(alice, 9);
+
+        uint256 staked = _makeWinners(d, 10, 100e6); // every ticket wins 100
+        _rollover();
+        _drainCursor(d);
+        assertEq(pool.pot(d), staked, "the pot must include the sponsored tickets' winnings");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        vm.prank(bob);
+        pool.claim(ds);
+        vm.prank(alice);
+        pool.claim(ds);
+
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked, "the sole joiner takes the whole pot");
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 0, "the sponsor gets nothing when joiners exist");
+    }
+
+    function test_sponsor_repeatAccumulatesAndCountsOnce() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 2);
+        _sponsor(alice, 3);
+        (uint256 sponsoredTickets, uint256 sponsors) = pool.sponsorsOf(d);
+        assertEq(sponsoredTickets, 5);
+        assertEq(sponsors, 1, "the same sponsor must not be counted twice");
+    }
+
+    function test_sponsor_respectsCapAndPause() public {
+        // Read the cap BEFORE arming the cheatcodes: an inline `MAX_TICKETS_PER_JOIN()` call
+        // here is a staticcall that happens after `expectRevert`/`prank` are set, so it
+        // consumes them and the test asserts nothing about `sponsor` itself (see
+        // `test_join_oneOverCap_reverts`, same gotcha).
+        uint32 overCap = _cap() + 1;
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.InvalidTicketCount.selector);
+        pool.sponsor(overCap);
+
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.InvalidTicketCount.selector);
+        pool.sponsor(0);
+
+        pool.pause();
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.Paused.selector);
+        pool.sponsor(1);
+    }
+
+    /// @dev The revenue path. A sponsored buy must still route the referral wallet, and a silent
+    ///      drop is invisible in every other test — this is how the referral wallet earns its
+    ///      cut of the sale.
+    function test_sponsor_stillRoutesTheReferralWallet() public {
+        _sponsor(alice, 2);
+        address[] memory refs = rtb.getLastReferrers();
+        assertEq(refs.length, 1);
+        assertEq(refs[0], REFERRAL, "referral wallet present - this is the revenue path");
+    }
+
+    function test_sponsor_emitsSponsored() public {
+        uint256 d = jackpot.currentDrawingId();
+        vm.expectEmit(true, true, false, true, address(pool));
+        emit IFarpotPool.Sponsored(d, alice, 4);
+        _sponsor(alice, 4);
+    }
+
+    function test_fallback_sponsorOnlyPoolPaysSponsors() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 3);
+        _sponsor(bob, 1);
+
+        uint256 staked = _makeWinners(d, 4, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        // The view reports the non-zero fallback share BEFORE anyone claims, proving it is
+        // not dead code that only ever returns 0.
+        (, uint256 aliceOwedBefore,) = pool.sponsorShareOf(d, alice);
+        assertEq(aliceOwedBefore, (staked * 3) / 4, "alice's owed share, pre-claim");
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        vm.prank(alice);
+        pool.claim(ds);
+        vm.prank(bob);
+        pool.claim(ds);
+
+        // 3:1 by sponsored weight.
+        assertEq(usdc.balanceOf(alice) - aliceBefore, (staked * 3) / 4, "alice's sponsored share");
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked / 4, "bob's sponsored share");
+
+        // And drops to 0 once claimed - `hasClaimed` gates `owed` the same way it does for
+        // `shareOf`.
+        (,, bool aliceClaimedAfter) = pool.sponsorShareOf(d, alice);
+        assertTrue(aliceClaimedAfter);
+        (, uint256 aliceOwedAfter,) = pool.sponsorShareOf(d, alice);
+        assertEq(aliceOwedAfter, 0, "alice's owed share, post-claim");
+    }
+
+    function test_fallback_disappearsWhenAJoinerArrives() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 9);
+        _join(bob, 1); // arrives after the sponsor, before lock
+
+        uint256 staked = _makeWinners(d, 10, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 0, "one joiner removes the fallback entirely");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked, "the joiner takes all of it");
+    }
+
+    /// @dev PINS A DELIBERATE PROPERTY, NOT A BUG. A sponsor who ALSO joins collects a joiner
+    ///      share of the whole pot, sponsored winnings included. It cannot be fixed in the
+    ///      contract — barring sponsors from joining is one extra address away from meaningless —
+    ///      so the UI copy must say "sponsored tickets pay out to everyone else", never "the
+    ///      sponsor gets nothing". If this test ever fails, the copy rule changed with it.
+    function test_sponsorWhoAlsoJoins_collectsAJoinerShare() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 9);
+        _join(alice, 1); // the only joiner
+
+        uint256 staked = _makeWinners(d, 10, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256 before = usdc.balanceOf(alice);
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        vm.prank(alice);
+        pool.claim(ds);
+
+        assertEq(usdc.balanceOf(alice) - before, staked, "the sole joiner takes 100%, sponsor or not");
+        assertEq(pool.sponsoredByUser(d, alice), 9, "and is still credited as a sponsor");
+    }
+
+    function test_sponsorShareOf_reportsZeroWhenJoinersExist() public {
+        uint256 d = jackpot.currentDrawingId();
+        _sponsor(alice, 5);
+
+        // Before settlement (`d` is still the current drawing, so `pot[d] == 0`), the view
+        // already reports alice's sponsored weight and that she has not claimed...
+        (uint256 t1,, bool c1) = pool.sponsorShareOf(d, alice);
+        assertEq(t1, 5);
+        assertFalse(c1);
+
+        // ...and the moment a joiner exists, she is owed nothing.
+        _join(bob, 1);
+        _makeWinners(d, 6, 100e6);
+        _rollover();
+        _drainCursor(d);
+        (, uint256 owed2,) = pool.sponsorShareOf(d, alice);
+        assertEq(owed2, 0, "sponsors are owed zero whenever joiners exist");
+    }
+}
+
+/*//////////////////////////////////////////////////////////////////////////////
                         ADVERSARIAL BUYER RESPONSES
 
   Megapot's ids are unique by construction, so a fork test can never produce any
@@ -511,6 +706,47 @@ contract FarpotPoolClaimBatchTest is PoolTestBase {
         );
     }
 
+    /// @dev The two-coexisting-pots solvency scenario, with one pot on the SPONSOR fallback path.
+    ///      I7's per-class walk is new code; this proves it against a second simultaneous pot
+    ///      rather than trusting the fuzzer to build the combination.
+    function test_solvency_sponsorOnlyPotCoexistsWithAJoinerPot() public {
+        uint256 d1 = jackpot.currentDrawingId();
+        _sponsor(alice, 4); // sponsor-only drawing
+        uint256 staked1 = _makeWinners(d1, 4, 100e6);
+        _rollover();
+
+        uint256 d2 = jackpot.currentDrawingId();
+        _join(bob, 2); // ordinary joiner drawing
+        uint256 staked2 = _makeWinners(d2, 2, 100e6);
+        _rollover();
+
+        _drainCursor(d1);
+        _drainCursor(d2);
+
+        // Both pots are unclaimed at once and share ONE balance.
+        assertEq(pool.pot(d1), staked1);
+        assertEq(pool.pot(d2), staked2);
+        assertGe(usdc.balanceOf(address(pool)), staked1 + staked2, "one balance must cover both pots");
+
+        (, uint256 aliceOwed,) = pool.sponsorShareOf(d1, alice);
+        (, uint256 bobOwed,) = pool.shareOf(d2, bob);
+        assertEq(aliceOwed, staked1);
+        assertEq(bobOwed, staked2);
+
+        uint256[] memory ds = new uint256[](2);
+        ds[0] = d1;
+        ds[1] = d2;
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, staked1, "alice takes only her sponsor pot");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(bob) - bobBefore, staked2, "bob takes only his joiner pot");
+    }
+
     function test_claimBatch_emitsBatchClaimed() public {
         _join(alice, 2);
         uint256 staked = _makeWinners(D0, 2, 3e6);
@@ -529,6 +765,37 @@ contract FarpotPoolClaimBatchTest is PoolTestBase {
         pool.claimBatch(D0, 1); // must not revert
         (,,,, uint256 cursor,) = pool.poolOf(D0);
         assertEq(cursor, 1, "claimBatch is never blocked by pause");
+    }
+
+    /// @dev Measures crank cost for a heavily sponsored drawing. Not a correctness assertion so
+    ///      much as a budget check: the number printed here is what the keeper pays to drain a
+    ///      drawing at the intended exposure ceiling.
+    function test_load_heavilySponsoredDrawingDrains() public {
+        uint256 d = jackpot.currentDrawingId();
+        uint32 cap = _cap();
+        // 500 tickets = the $500 sponsor soft cap at $1/ticket.
+        for (uint256 i; i < 50; ++i) {
+            _sponsor(alice, cap);
+        }
+        (uint256 sponsored,) = pool.sponsorsOf(d);
+        assertEq(sponsored, 500);
+
+        _rollover();
+
+        uint256 batches;
+        uint256 gasUsed;
+        uint16 batch = uint16(pool.MAX_CLAIM_BATCH());
+        while (true) {
+            (,,,, uint256 cursor, uint256 count) = pool.poolOf(d);
+            if (cursor >= count) break;
+            uint256 before = gasleft();
+            pool.claimBatch(d, batch);
+            gasUsed += before - gasleft();
+            ++batches;
+        }
+        emit log_named_uint("claimBatch transactions to drain 500 tickets", batches);
+        emit log_named_uint("total gas", gasUsed);
+        assertEq(batches, 7, "500 tickets / 75 per batch");
     }
 }
 
@@ -833,6 +1100,26 @@ contract FarpotPoolClaimTest is PoolTestBase {
 
     function naiveShare(uint256 potAmount, uint256 w, uint256 total) external pure returns (uint256) {
         return potAmount * w / total;
+    }
+
+    function test_claim_withNoWeightDoesNotBurnTheClaimedFlag() public {
+        uint256 d = jackpot.currentDrawingId();
+        _join(bob, 1);
+        _makeWinners(d, 1, 100e6);
+        _rollover();
+        _drainCursor(d);
+
+        uint256[] memory ds = new uint256[](1);
+        ds[0] = d;
+        // A stranger with no weight claims first. This must be a no-op, NOT a flag burn.
+        vm.prank(outsider);
+        pool.claim(ds);
+        assertFalse(pool.claimed(d, outsider), "a no-weight claim must not set claimed");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        pool.claim(ds);
+        assertEq(usdc.balanceOf(bob) - bobBefore, 100e6, "the real claimant is unaffected");
     }
 }
 
@@ -1211,6 +1498,24 @@ contract FarpotPoolConstructorTest is PoolTestBase {
         nft.setJackpot(address(other)); // nft.jackpot() != _jackpot
         vm.expectRevert(IFarpotPool.InconsistentDeps.selector);
         _deploy(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
+    }
+
+    function test_deploysPaused_andJoinRevertsUntilUnpaused() public {
+        FarpotPool fresh = new FarpotPool(address(jackpot), address(rtb), address(nft), address(usdc), REFERRAL);
+        assertTrue(fresh.paused(), "a fresh pool must deploy paused");
+
+        vm.prank(alice);
+        usdc.approve(address(fresh), type(uint256).max);
+        vm.prank(alice);
+        vm.expectRevert(IFarpotPool.Paused.selector);
+        fresh.join(1);
+
+        fresh.unpause();
+        assertFalse(fresh.paused());
+        vm.prank(alice);
+        fresh.join(1);
+        (uint256 tickets,,,,,) = fresh.poolOf(jackpot.currentDrawingId());
+        assertEq(tickets, 1, "join must work once unpaused");
     }
 }
 

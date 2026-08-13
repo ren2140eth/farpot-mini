@@ -32,11 +32,13 @@ import {
   FARPOT_POOL_ABI,
   POOL_STATE,
   POOL_SOFT_CAP_USDC,
+  POOL_SPONSOR_SOFT_CAP_USDC,
+  POOL_SPONSOR_BILLING_MIN_USDC,
   POOL_FIRST_DRAWING,
   POOL_HISTORY_LOOKBACK,
 } from "@/lib/constants";
 import { confirmTransaction } from "@/lib/transaction-receipt";
-import { poolJoinLimits } from "@/lib/pool-cap";
+import { poolJoinLimits, poolSponsorLimits } from "@/lib/pool-cap";
 import { bufferGas } from "@/lib/gas-buffer";
 import { poolHistoryRange, poolRowState } from "@/lib/pool-history";
 
@@ -563,6 +565,29 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
   );
 }
 
+// Which sponsor gets billed on the hero line / group-win share card, given a drawing's
+// sponsor list. Pulled out to a pure top-level function (rather than living only inside the
+// `billedSponsor` useMemo) so the group-win share path can run the SAME selection against a
+// past drawing's sponsor list without a second, driftable copy of the rule.
+//
+// Weight desc, then address asc. The second key is what makes this deterministic: the sponsor
+// list comes out of a Redis Set, so its arrival order is arbitrary and a weight-only sort would
+// let cache ordering pick the winner between equal sponsors.
+function pickBilledSponsor(
+  sponsors: PoolContributor[],
+  ticketPrice: bigint,
+): PoolContributor | null {
+  const eligible = sponsors.filter(
+    (s) => BigInt(s.tickets) * ticketPrice >= POOL_SPONSOR_BILLING_MIN_USDC,
+  );
+  if (eligible.length === 0) return null;
+  return [...eligible].sort((a, b) => {
+    const byWeight = Number(BigInt(b.tickets) - BigInt(a.tickets));
+    if (byWeight !== 0) return byWeight;
+    return a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1;
+  })[0];
+}
+
 // ── Component ────────────────────────────────────────────────
 
 export default function Home() {
@@ -930,12 +955,29 @@ export default function Home() {
   const [poolQuantity, setPoolQuantity] = useState(1);
   const [joinPhase, setJoinPhase] = useState<BuyPhase>("idle");
   const [joinError, setJoinError] = useState("");
+  const [sponsorQuantity, setSponsorQuantity] = useState(1);
+  const [sponsorPhase, setSponsorPhase] = useState<BuyPhase>("idle");
+  const [sponsorError, setSponsorError] = useState("");
   const [poolRefresh, setPoolRefresh] = useState(0);
   const [contributors, setContributors] = useState<PoolContributor[]>([]);
   const [contributorsDegraded, setContributorsDegraded] = useState(false);
+  // The per-address sponsor list from the same route, used to pick who the hero
+  // line names (see billedSponsor below) — distinct from sponsorsOf's aggregate
+  // totals, which stay reliable even when this list is empty or degraded.
+  const [sponsors, setSponsors] = useState<PoolContributor[]>([]);
   const [yourPoolDrawings, setYourPoolDrawings] = useState<bigint[]>([]);
+  const [yourSponsoredDrawings, setYourSponsoredDrawings] = useState<bigint[]>([]);
   const [poolClaimError, setPoolClaimError] = useState("");
   const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
+  // Set after a successful group claim, from `poolOf(drawingId)` — the pool's TOTAL pot and
+  // headcount for that drawing, never the wallet's own share (which is all `shareOf` gives).
+  // Feeds the "Share the group win" button; null hides it, same as the ticket-claim share path.
+  const [lastGroupWin, setLastGroupWin] = useState<{
+    drawingId: bigint;
+    pot: bigint;
+    contributorCount: bigint;
+    sponsorHandle: string | null;
+  } | null>(null);
 
   const poolArgs = currentDrawingId !== undefined ? ([currentDrawingId] as const) : undefined;
 
@@ -953,6 +995,17 @@ export default function Home() {
     functionName: "shareOf",
     args: currentDrawingId !== undefined && address ? [currentDrawingId, address] : undefined,
     query: { enabled: currentDrawingId !== undefined && !!address, refetchInterval: 60_000 },
+  });
+
+  // Same shape as poolOf — the pool-wide totals of tickets bought FOR the pool by sponsors.
+  // Kept alongside poolOf's read so the two can never drift apart on screen; every place that
+  // refetches poolOf also refetches this.
+  const { data: sponsorsData, refetch: refetchSponsors } = useReadContract({
+    address: FARPOT_POOL_ADDRESS,
+    abi: FARPOT_POOL_ABI,
+    functionName: "sponsorsOf",
+    args: poolArgs,
+    query: { enabled: currentDrawingId !== undefined, refetchInterval: 60_000 },
   });
 
   // Read the cap from the contract rather than hardcoding it, so the UI and the
@@ -982,6 +1035,8 @@ export default function Home() {
   const poolContributorCount = poolData?.[1] ?? BigInt(0);
   const poolState = poolData?.[3] ?? POOL_STATE.None;
   const yourPoolTickets = shareData?.[0] ?? BigInt(0);
+  const sponsoredTickets = sponsorsData?.[0] ?? BigInt(0);
+  const sponsorCount = sponsorsData?.[1] ?? BigInt(0);
 
   // Soft cap, converted through the LIVE ticket price — never a hardcoded $1,
   // because the price is a chain value. The arithmetic lives in pool-cap.ts so
@@ -994,12 +1049,24 @@ export default function Home() {
     contractCap,
     softCapUsdc: POOL_SOFT_CAP_USDC,
   });
+  // Same cap arithmetic, a separate budget: sponsored value has its own soft cap so a
+  // sponsorship cannot consume the joiners' headroom. `contractCap` is shared — join and
+  // sponsor both route through the pool's one `_buyAndRecord`, so MAX_TICKETS_PER_JOIN is the
+  // per-transaction ceiling for both.
+  const { maxThisSponsor: sponsorMaxThisSponsor, atCap: sponsorAtCap } = poolSponsorLimits({
+    sponsoredTickets,
+    ticketPrice: poolTicketPrice,
+    contractCap,
+    softCapUsdc: POOL_SPONSOR_SOFT_CAP_USDC,
+  });
   // Derived, not clamped into state by an effect. The pool fills underneath the
   // user while this tab is open, so the maximum moves; deriving it every render
   // keeps the displayed quantity in range without a setState-in-effect, and
   // without the frame where an out-of-range number is briefly visible.
   const poolQty = poolMaxThisJoin > 0 ? Math.min(poolQuantity, poolMaxThisJoin) : 0;
   const poolCost = poolTicketPrice * BigInt(poolQty);
+  const sponsorQty = sponsorMaxThisSponsor > 0 ? Math.min(sponsorQuantity, sponsorMaxThisSponsor) : 0;
+  const sponsorCost = poolTicketPrice * BigInt(sponsorQty);
 
   // ── Pool hero, derived at render (no state, nothing to keep in sync) ──
   // Share is floored to one decimal so it can never round 0.4% up to a whole
@@ -1030,7 +1097,30 @@ export default function Home() {
     // row next to the face pile.
     return `${name(contributors[0])} and ${n - 1} others are in`;
   })();
+
+  // Billing follows SIZE, with a floor and a deterministic tie-break. "Largest wins" alone sets
+  // only a relative price — in an otherwise unsponsored drawing a single $1 ticket would buy the
+  // headline — and without a tie rule, cache and log ordering silently decides whose name sits on
+  // the app. Sponsors below the floor still count in the totals (sponsoredTickets/sponsorCount);
+  // they just get no headline.
+  const billedSponsor = useMemo(
+    () => pickBilledSponsor(sponsors, poolTicketPrice),
+    [sponsors, poolTicketPrice],
+  );
+  // "a sponsor" fallback covers sponsors-exist-but-none-above-floor: sponsoredTickets > 0
+  // while billedSponsor is null.
+  const sponsorHeroName = billedSponsor
+    ? billedSponsor.username
+      ? `@${billedSponsor.username}`
+      : `${billedSponsor.address.slice(0, 6)}…${billedSponsor.address.slice(-4)}`
+    : "a sponsor";
   const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
+  // Same USDC allowance as join — both spend from the wallet's approval to FARPOT_POOL_ADDRESS,
+  // only the quantity (and so the cost) differs. `undefined` means NEEDS approval, never "no
+  // approval needed": the allowance-race bug documented in AGENTS.md was caused by the opposite
+  // default, and the sponsor button below additionally refuses to enable at all while this is
+  // undefined rather than relying on the approve-first fallback alone.
+  const sponsorNeedsApproval = poolAllowance === undefined || poolAllowance < sponsorCost;
 
   // The contributor list is decorative; a failure hides the faces and nothing else.
   useEffect(() => {
@@ -1045,14 +1135,20 @@ export default function Home() {
         if (cancelled) return;
         setContributors(body.contributors ?? []);
         setContributorsDegraded(Boolean(body.degraded));
+        setSponsors(body.sponsors ?? []);
         setYourPoolDrawings(
           ((body.yourDrawings ?? []) as string[]).map((d) => BigInt(d)),
+        );
+        setYourSponsoredDrawings(
+          ((body.yourSponsoredDrawings ?? []) as string[]).map((d) => BigInt(d)),
         );
       } catch {
         if (cancelled) return;
         setContributors([]);
         setContributorsDegraded(true);
+        setSponsors([]);
         setYourPoolDrawings([]);
+        setYourSponsoredDrawings([]);
       }
     })();
     return () => {
@@ -1102,6 +1198,7 @@ export default function Home() {
       setJoinPhase("success");
       haptics.success();
       refetchPool();
+      refetchSponsors();
       refetchShare();
       refetchPoolAllowance();
       refetchUsdcBalance();
@@ -1137,6 +1234,87 @@ export default function Home() {
     refetchPool,
     refetchPoolAllowance,
     refetchShare,
+    refetchSponsors,
+    refetchUsdcBalance,
+  ]);
+
+  const handleSponsor = useCallback(async () => {
+    if (!address || sponsorQty < 1) return;
+    setSponsorError("");
+    haptics.impact();
+    try {
+      if (sponsorNeedsApproval) {
+        setSponsorPhase("approving");
+        const approveHash = await writeContract(config, {
+          address: USDC_ADDRESS,
+          abi: USDC_ABI,
+          functionName: "approve",
+          args: [FARPOT_POOL_ADDRESS, sponsorCost],
+        });
+        const approveReceipt = await confirmTransaction(config, approveHash);
+        if (approveReceipt.status === "reverted") throw new Error("Approval transaction reverted");
+      }
+      setSponsorPhase("buying");
+      // sponsor() routes through the same heavy buy path as join() (both share
+      // _buyAndRecord), so it needs the same gas buffer — see gas-buffer.ts.
+      const sponsorCalldata = encodeFunctionData({
+        abi: FARPOT_POOL_ABI,
+        functionName: "sponsor",
+        args: [sponsorQty],
+      });
+      const sponsorEstimate = await estimateGas(config, {
+        account: address,
+        to: FARPOT_POOL_ADDRESS,
+        data: sponsorCalldata,
+      });
+      const hash = await writeContract(config, {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "sponsor",
+        args: [sponsorQty],
+        gas: bufferGas(sponsorEstimate),
+      });
+      const receipt = await confirmTransaction(config, hash);
+      if (receipt.status === "reverted") throw new Error("Sponsor reverted");
+      setSponsorPhase("success");
+      haptics.success();
+      refetchPool();
+      refetchSponsors();
+      refetchShare();
+      refetchPoolAllowance();
+      refetchUsdcBalance();
+      // Re-pull the contributor list — the sponsor's own row (avatar/handle) surfaces there too.
+      setPoolRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setSponsorPhase("error");
+      haptics.error();
+      // Same distinction as handleJoin: PoolLocked clears by itself, Paused does not.
+      if (/user rejected|user denied|rejected the request/i.test(raw)) {
+        setSponsorError("Sponsor cancelled.");
+      } else if (/PoolLocked/i.test(raw)) {
+        setSponsorError("The draw is about to happen, try again shortly.");
+      } else if (/Paused/i.test(raw)) {
+        setSponsorError("Sponsoring is paused right now. Existing pools are unaffected.");
+      } else if (/InvalidTicketCount/i.test(raw)) {
+        setSponsorError(`You can sponsor up to ${contractCap} tickets at a time.`);
+      } else if (/transfer amount exceeds balance|insufficient/i.test(raw)) {
+        setSponsorError("Not enough USDC for that many tickets.");
+      } else {
+        setSponsorError("Couldn't complete the sponsorship — try again, or try fewer tickets.");
+      }
+    }
+  }, [
+    address,
+    config,
+    contractCap,
+    sponsorCost,
+    sponsorNeedsApproval,
+    sponsorQty,
+    refetchPool,
+    refetchPoolAllowance,
+    refetchShare,
+    refetchSponsors,
     refetchUsdcBalance,
   ]);
 
@@ -1158,16 +1336,26 @@ export default function Home() {
       lookback: POOL_HISTORY_LOOKBACK,
     });
     const seen = new Set(recent.map((d) => d.toString()));
-    const older = yourPoolDrawings.filter(
-      (d) => d < currentDrawingId && !seen.has(d.toString()),
-    );
+    // Union the joiner and sponsor reverse indexes, deduping across both — a drawing this
+    // wallet both joined and sponsored must only appear once in this id list (it renders as a
+    // single joiner row below; see mySponsoredPools).
+    const older: bigint[] = [];
+    for (const d of [...yourPoolDrawings, ...yourSponsoredDrawings]) {
+      const key = d.toString();
+      if (d < currentDrawingId && !seen.has(key)) {
+        seen.add(key);
+        older.push(d);
+      }
+    }
     // Newest first across both sources.
     return [...recent, ...older].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
-  }, [currentDrawingId, yourPoolDrawings]);
+  }, [currentDrawingId, yourPoolDrawings, yourSponsoredDrawings]);
 
-  // Two entries per drawing, one multicall. `shareOf` carries the user's weight, what they are
-  // owed and whether they already claimed; `poolStateOf` gates whether the figure may be shown
-  // at all.
+  // Three entries per drawing, one multicall. `shareOf` carries the user's joiner weight, what
+  // they are owed and whether they already claimed; `poolStateOf` gates whether either figure
+  // may be shown at all; `sponsorShareOf` carries the same triple for the zero-joiner sponsor
+  // fallback (Task 11B). Every index below MUST stay `i * 3` / `i * 3 + 1` / `i * 3 + 2` — an
+  // off-by-one here silently pairs one drawing's read with another's.
   const { data: pastPoolReads, refetch: refetchPastPools } = useReadContracts({
     contracts: pastDrawingIds.flatMap((d) => [
       {
@@ -1181,6 +1369,12 @@ export default function Home() {
         abi: FARPOT_POOL_ABI,
         functionName: "poolStateOf" as const,
         args: [d] as const,
+      },
+      {
+        address: FARPOT_POOL_ADDRESS,
+        abi: FARPOT_POOL_ABI,
+        functionName: "sponsorShareOf" as const,
+        args: [d, address as `0x${string}`] as const,
       },
     ]),
     query: {
@@ -1199,13 +1393,50 @@ export default function Home() {
       state: number;
     }[] = [];
     pastDrawingIds.forEach((drawingId, i) => {
-      const share = pastPoolReads[i * 2];
-      const state = pastPoolReads[i * 2 + 1];
+      const share = pastPoolReads[i * 3];
+      const state = pastPoolReads[i * 3 + 1];
       // A failed read is skipped rather than rendered as a zero — showing "you won $0" because
       // an RPC call failed is worse than showing nothing.
       if (share?.status !== "success" || state?.status !== "success") return;
       const [tickets, owed, hasClaimed] = share.result as readonly [bigint, bigint, boolean];
       if (tickets === BigInt(0)) return; // never joined this drawing
+      out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
+    });
+    return out;
+  }, [pastPoolReads, pastDrawingIds]);
+
+  // Sponsor rows: a drawing this wallet sponsored. A row qualifies ONLY when this wallet's
+  // OWN `shareOf.tickets` is zero — a drawing the wallet both joined and sponsored already
+  // renders above as a joiner row, and `totalTickets != 0` there by construction means
+  // `sponsorShareOf.owed` is zero anyway (see Task 11B brief: showing both would imply two
+  // payouts for one drawing).
+  const mySponsoredPools = useMemo(() => {
+    if (!pastPoolReads) return [];
+    const out: {
+      drawingId: bigint;
+      tickets: bigint;
+      owed: bigint;
+      hasClaimed: boolean;
+      state: number;
+    }[] = [];
+    pastDrawingIds.forEach((drawingId, i) => {
+      const share = pastPoolReads[i * 3];
+      const state = pastPoolReads[i * 3 + 1];
+      const sponsorShare = pastPoolReads[i * 3 + 2];
+      if (
+        share?.status !== "success" ||
+        state?.status !== "success" ||
+        sponsorShare?.status !== "success"
+      )
+        return;
+      const [joinerTickets] = share.result as readonly [bigint, bigint, boolean];
+      if (joinerTickets !== BigInt(0)) return; // renders as a joiner row instead
+      const [tickets, owed, hasClaimed] = sponsorShare.result as readonly [
+        bigint,
+        bigint,
+        boolean,
+      ];
+      if (tickets === BigInt(0)) return; // never sponsored this drawing
       out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
     });
     return out;
@@ -1242,6 +1473,42 @@ export default function Home() {
         haptics.success();
         refetchPastPools();
         refetchUsdcBalance();
+
+        // Group-win share data: the drawing's TOTAL pot and headcount (poolOf), never the
+        // wallet's own share — shareOf/sponsorShareOf only carry that. Best-effort: a failure
+        // here must never surface as a claim error, since the claim itself already went
+        // through above. Sponsor credit is a second best-effort layer inside the first, so a
+        // sponsor-lookup failure still leaves the pot/headcount share intact.
+        try {
+          const poolOfResult = await readContract(config, {
+            address: FARPOT_POOL_ADDRESS,
+            abi: FARPOT_POOL_ABI,
+            functionName: "poolOf",
+            args: [drawingId],
+          });
+          const [, contributorCount, potAmount] = poolOfResult;
+          // A sponsor-class fallback claim (contributorCount == 0 — no one ever joined this
+          // drawing) is not a group win: it is a sponsor recovering their own stake alone. The
+          // group-win banner/cast/card must never fire for it — see Fix 1 review — so gate on
+          // the same signal the contract itself uses to distinguish the two claimant classes.
+          if (contributorCount > BigInt(0)) {
+            let sponsorHandle: string | null = null;
+            try {
+              const res = await fetch(`/api/pool/contributors?drawingId=${drawingId}`);
+              const body = await res.json();
+              const billed = pickBilledSponsor(
+                (body.sponsors ?? []) as PoolContributor[],
+                poolTicketPrice,
+              );
+              sponsorHandle = billed?.username ?? null;
+            } catch {
+              /* sponsor credit is decorative; the pot/headcount below still stand alone */
+            }
+            setLastGroupWin({ drawingId, pot: potAmount, contributorCount, sponsorHandle });
+          }
+        } catch {
+          /* group-win share data is decorative; the claim already succeeded above */
+        }
       } catch (err: unknown) {
         const raw = err instanceof Error ? err.message : String(err);
         haptics.error();
@@ -1256,7 +1523,7 @@ export default function Home() {
         setClaimingDrawing(null);
       }
     },
-    [address, config, refetchPastPools, refetchUsdcBalance],
+    [address, config, poolTicketPrice, refetchPastPools, refetchUsdcBalance],
   );
 
   const handleSharePool = useCallback(() => {
@@ -1269,6 +1536,28 @@ export default function Home() {
     });
   }, [composeCast, poolTickets]);
 
+  const handleShareGroupWin = useCallback(() => {
+    if (!lastGroupWin || lastGroupWin.pot <= BigInt(0)) return;
+    const shareAmount = formatShareUSDC(lastGroupWin.pot);
+    const players = Number(lastGroupWin.contributorCount);
+    const params = new URLSearchParams({
+      mode: "group",
+      pot: shareAmount,
+      players: String(players),
+      // Busts the wrpcd.net CDN cache (immutable, 1y) so a common pot/player combo doesn't
+      // keep serving a stale render across design changes. Bump when the card design changes.
+      v: "3",
+    });
+    if (lastGroupWin.sponsorHandle) params.set("sponsor", lastGroupWin.sponsorHandle);
+    const cardUrl = `${APP_URL}/api/share/win-card?${params.toString()}`;
+    const sponsorSuffix = lastGroupWin.sponsorHandle
+      ? ` — sponsored by @${lastGroupWin.sponsorHandle}`
+      : "";
+    composeCast({
+      text: `Our Farpot group just won $${shareAmount} across ${players} player${players === 1 ? "" : "s"} 🎉${sponsorSuffix}`,
+      embeds: [cardUrl, APP_URL],
+    });
+  }, [composeCast, lastGroupWin]);
 
   const handleShare = useCallback(() => {
     if (!drawingState) return;
@@ -2985,6 +3274,23 @@ export default function Home() {
             <p className="text-mut text-xs text-center">
               Everyone&rsquo;s tickets ride together — the pot splits by how many you put in.
             </p>
+
+            {/* Sponsored hero line — shown whenever this draw has ANY sponsored tickets,
+                independent of whether one cleared the billing floor (see billedSponsor
+                above). This is the one place on the tab where the "no better odds" copy
+                rule does NOT apply: a sponsored draw is genuinely +EV for joiners, because
+                sponsored tickets ride in the pot but pay out only to joiners. Both lines
+                share the same gate so they always appear together. */}
+            {sponsoredTickets > BigInt(0) && (
+              <div className="mt-3 space-y-1 text-center">
+                <p className="pool-dimmer text-[11px]">
+                  {`${sponsoredTickets.toString()} sponsored ticket${sponsoredTickets === BigInt(1) ? "" : "s"} from ${sponsorHeroName} — free odds for everyone in`}
+                </p>
+                <p className="text-wins-green text-[11px] font-semibold">
+                  {`Sponsored tickets pay out to joiners, so joining a sponsored pool is better than buying alone.`}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Join — the same surface as the Play tab's ticket panel, so the
@@ -3076,71 +3382,317 @@ export default function Home() {
             )}
           </div>
 
+          {/* Sponsor — a secondary CTA below Join, same surface treatment. Sponsored
+              tickets ride in the pot but carry no joiner weight of their own; a sponsor
+              who also joins still collects a joiner share of the WHOLE pot, including
+              their own sponsored tickets' winnings (see FarpotPool's
+              test_sponsorWhoAlsoJoins_collectsAJoinerShare). The copy below must never
+              say a sponsor "gets nothing" — it is false.
+
+              This panel reads only the aggregate ticket counts from sponsorsOf, never
+              sponsorShareOf's `owed`: while a sponsored drawing is still Accumulating
+              with no joiners, `owed` reports the sponsor as owed the ENTIRE pot — a
+              number that drops to zero the instant anyone joins. Same rule as
+              myPastPools/poolRowState below (no payout figure before Settled); there is
+              simply nothing here to gate because no payout figure is read at all. */}
+          <div className="play-ticket-panel">
+            <h3 className="text-white font-heading font-extrabold text-sm">Sponsor this pool</h3>
+            <p className="pool-dim text-xs mt-2">
+              Your tickets go into the pot, but their winnings pay out to everyone else who joins.
+              Sponsoring is how you improve the odds for the whole group.
+            </p>
+
+            {sponsoredTickets > BigInt(0) && (
+              // Kept as ONE template literal, not split JSX text/expression children — a
+              // newline between a text node and an adjacent {expr} is trimmed away entirely
+              // by the JSX transform (see the odds-line gotcha in AGENTS.md), which would
+              // glue "far" directly onto "by".
+              <p className="pool-dimmer text-[11px] mt-2">
+                {`${sponsoredTickets.toString()} ticket${
+                  sponsoredTickets === BigInt(1) ? "" : "s"
+                } sponsored so far${
+                  sponsorCount > BigInt(0)
+                    ? ` by ${sponsorCount.toString()} sponsor${sponsorCount === BigInt(1) ? "" : "s"}.`
+                    : "."
+                }`}
+              </p>
+            )}
+
+            {poolPaused ? (
+              <p className="pool-dim text-sm mt-3">
+                Sponsoring is paused right now. Existing pools are unaffected.
+              </p>
+            ) : drawingState?.jackpotLock ? (
+              <p className="pool-dim text-sm mt-3">
+                The draw is about to happen, so sponsoring is closed for a few minutes. It
+                reopens for the next drawing.
+              </p>
+            ) : sponsorAtCap ? (
+              <p className="pool-dim text-sm mt-3">
+                Sponsorship for this draw is full for now — we&rsquo;re keeping sponsorships to a
+                soft cap of ${(Number(POOL_SPONSOR_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw
+                while the contract is still being audited. It reopens with the next drawing.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-white font-heading font-bold text-sm">
+                    Tickets to sponsor
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setSponsorQuantity(Math.max(1, sponsorQty - 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      −
+                    </button>
+                    <span className="text-white font-heading font-extrabold w-8 text-center">
+                      {sponsorQty}
+                    </span>
+                    <button
+                      onClick={() => {
+                        haptics.select();
+                        setSponsorQuantity(Math.min(sponsorMaxThisSponsor, sponsorQty + 1));
+                      }}
+                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <p className="pool-dimmer text-[11px] mt-2">
+                  Up to {sponsorMaxThisSponsor} per sponsorship — sponsor as often as you like.
+                </p>
+
+                {isConnected ? (
+                  <button
+                    onClick={handleSponsor}
+                    disabled={
+                      sponsorPhase === "approving" ||
+                      sponsorPhase === "buying" ||
+                      sponsorCost === BigInt(0) ||
+                      // Block while the allowance loads for the pool contract — treating
+                      // an unknown allowance as "no approval needed" is the exact race
+                      // documented in AGENTS.md.
+                      poolAllowance === undefined
+                    }
+                    className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
+                      sponsorPhase === "approving" ||
+                      sponsorPhase === "buying" ||
+                      sponsorCost === BigInt(0) ||
+                      poolAllowance === undefined
+                        ? "bg-white/5 text-mut cursor-not-allowed"
+                        : "btn-gold"
+                    } ${sponsorPhase === "approving" || sponsorPhase === "buying" ? "animate-pulse" : ""}`}
+                  >
+                    {sponsorPhase === "approving"
+                      ? "Approving USDC…"
+                      : sponsorPhase === "buying"
+                        ? "Sponsoring…"
+                        : poolAllowance === undefined
+                          ? "Checking approval…"
+                          : `Sponsor ${sponsorQty} Ticket${sponsorQty === 1 ? "" : "s"} · $${formatUnits(sponsorCost, USDC_DECIMALS)}`}
+                  </button>
+                ) : (
+                  <div className="mt-4">
+                    <ConnectWallet />
+                  </div>
+                )}
+
+                {sponsorPhase === "success" && (
+                  <p className="text-wins-green text-sm font-heading font-bold mt-3">
+                    Sponsored 🎁
+                  </p>
+                )}
+                {sponsorError && <p className="text-coral text-sm mt-3">{sponsorError}</p>}
+              </>
+            )}
+          </div>
+
           {/* Your past pools — the claim path.
               A Claimable pool must NOT show a payout figure: shareOf reports only the pot
               collected so far while claimBatch is still draining, so a number here would be
-              wrong and would then change under the user. Only Settled is final. */}
-          {isConnected && myPastPools.length > 0 && (
-            <div>
-              <h3 className="text-white font-heading font-extrabold text-sm mb-2">Your past pools</h3>
-              <div className="space-y-2">
-                {myPastPools.map((p) => (
-                  <div
-                    key={p.drawingId.toString()}
-                    className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
-                  >
-                    <div>
-                      <p className="text-white font-heading font-bold text-sm">
-                        Draw #{p.drawingId.toString()}
-                      </p>
-                      <p className="pool-dimmer text-xs">
-                        {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
-                      </p>
-                    </div>
+              wrong and would then change under the user. Only Settled is final.
 
-                    {(() => {
-                      const row = poolRowState(p);
-                      switch (row.kind) {
-                        case "settling":
-                          return (
-                            <span className="pool-dim text-xs font-heading font-bold">
-                              Settling…
-                            </span>
-                          );
-                        case "pending":
-                          return <span className="pool-dimmer text-xs">—</span>;
-                        case "claimed":
-                          return (
-                            <span className="text-wins-green text-xs font-heading font-bold">
-                              ✓ claimed
-                            </span>
-                          );
-                        case "claimable":
-                          return (
-                            <button
-                              onClick={() => handleClaimPool(p.drawingId)}
-                              disabled={claimingDrawing === p.drawingId}
-                              className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
-                            >
-                              {claimingDrawing === p.drawingId
-                                ? "Claiming…"
-                                : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
-                            </button>
-                          );
-                        default:
-                          /* Settled with nothing owed: the pool's tickets did not win. Say so
-                             plainly rather than showing a $0.00 claim button. */
-                          return (
-                            <span className="pool-dimmer text-xs font-heading font-bold">
-                              No win this draw
-                            </span>
-                          );
-                      }
-                    })()}
+              Two SEPARATE lists render here, never merged: `myPastPools` (joiner rows, from
+              `shareOf`) and `mySponsoredPools` (sponsor rows, from `sponsorShareOf` — Task
+              11B, the zero-joiner fallback). Keeping them apart mirrors the on-chain split:
+              a joiner row can show a real payout at any time; a sponsor row's `owed` is
+              non-zero only on the rare drawing nobody joined, and merging the two would make
+              that distinction invisible in the UI. `handleClaimPool`/`claimingDrawing` are
+              shared — `claim(uint256[])` is class-agnostic on-chain, it just needs the row
+              plumbing to reach it. */}
+          {isConnected && (myPastPools.length > 0 || mySponsoredPools.length > 0) && (
+            <div className="space-y-4">
+              {myPastPools.length > 0 && (
+                <div>
+                  <h3 className="text-white font-heading font-extrabold text-sm mb-2">
+                    Your past pools
+                  </h3>
+                  <div className="space-y-2">
+                    {myPastPools.map((p) => (
+                      <div
+                        key={p.drawingId.toString()}
+                        className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <p className="text-white font-heading font-bold text-sm">
+                            Draw #{p.drawingId.toString()}
+                          </p>
+                          <p className="pool-dimmer text-xs">
+                            {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
+                          </p>
+                        </div>
+
+                        {(() => {
+                          const row = poolRowState(p);
+                          switch (row.kind) {
+                            case "settling":
+                              return (
+                                <span className="pool-dim text-xs font-heading font-bold">
+                                  Settling…
+                                </span>
+                              );
+                            case "pending":
+                              return <span className="pool-dimmer text-xs">—</span>;
+                            case "claimed":
+                              return (
+                                <span className="text-wins-green text-xs font-heading font-bold">
+                                  ✓ claimed
+                                </span>
+                              );
+                            case "claimable":
+                              return (
+                                <button
+                                  onClick={() => handleClaimPool(p.drawingId)}
+                                  disabled={claimingDrawing === p.drawingId}
+                                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
+                                >
+                                  {claimingDrawing === p.drawingId
+                                    ? "Claiming…"
+                                    : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
+                                </button>
+                              );
+                            default:
+                              /* Settled with nothing owed: the pool's tickets did not win. Say
+                                 so plainly rather than showing a $0.00 claim button. */
+                              return (
+                                <span className="pool-dimmer text-xs font-heading font-bold">
+                                  No win this draw
+                                </span>
+                              );
+                          }
+                        })()}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
+
+              {mySponsoredPools.length > 0 && (
+                <div>
+                  <h3 className="text-white font-heading font-extrabold text-sm mb-2">
+                    Your sponsorships
+                  </h3>
+                  <div className="space-y-2">
+                    {mySponsoredPools.map((p) => (
+                      <div
+                        key={p.drawingId.toString()}
+                        className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <p className="text-white font-heading font-bold text-sm">
+                            Draw #{p.drawingId.toString()}
+                          </p>
+                          <p className="pool-dimmer text-xs">
+                            {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"}{" "}
+                            sponsored
+                          </p>
+                        </div>
+
+                        {(() => {
+                          const row = poolRowState(p);
+                          switch (row.kind) {
+                            case "settling":
+                              return (
+                                <span className="pool-dim text-xs font-heading font-bold">
+                                  Settling…
+                                </span>
+                              );
+                            case "pending":
+                              return <span className="pool-dimmer text-xs">—</span>;
+                            case "claimed":
+                              return (
+                                <span className="text-wins-green text-xs font-heading font-bold">
+                                  ✓ claimed
+                                </span>
+                              );
+                            case "claimable":
+                              return (
+                                <button
+                                  onClick={() => handleClaimPool(p.drawingId)}
+                                  disabled={claimingDrawing === p.drawingId}
+                                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
+                                >
+                                  {claimingDrawing === p.drawingId
+                                    ? "Claiming…"
+                                    : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
+                                </button>
+                              );
+                            default:
+                              /* Settled with nothing owed via the sponsor class. This covers
+                                 two on-chain-distinct cases the row cannot tell apart without
+                                 reading poolOf(drawingId).tickets (deliberately out of scope —
+                                 see the Task 11B review): other people joined and the
+                                 sponsorship did its job (whether or not their ticket won), OR
+                                 nobody joined and the group's ticket genuinely lost. "No win
+                                 this draw" is FALSE in the first case whenever the joiners won,
+                                 and contradicts the standing rule below (a sponsor must never
+                                 be told they got nothing) — say only what this read proves: no
+                                 payout via the sponsor class. */
+                              return (
+                                <span className="pool-dimmer text-xs font-heading font-bold">
+                                  No sponsor payout this draw
+                                </span>
+                              );
+                          }
+                        })()}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {poolClaimError && <p className="text-coral text-sm mt-2">{poolClaimError}</p>}
+
+              {/* Fires after a successful group claim — see handleClaimPool's group-win fetch.
+                  `pot` is the drawing's TOTAL payout (poolOf), never this wallet's own share, so
+                  the card and cast read the same for every member of the winning pool. No
+                  button when the pot came back zero (the decorative fetch failed, or this drawing
+                  genuinely paid nothing via this claim class). */}
+              {lastGroupWin && lastGroupWin.pot > BigInt(0) && (
+                <div className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-white font-heading font-bold text-sm">
+                      Draw #{lastGroupWin.drawingId.toString()} claimed
+                    </p>
+                    <p className="pool-dimmer text-xs">
+                      ${formatUnits(lastGroupWin.pot, USDC_DECIMALS)} across{" "}
+                      {lastGroupWin.contributorCount.toString()} player
+                      {lastGroupWin.contributorCount === BigInt(1) ? "" : "s"}
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleShareGroupWin}
+                    className="px-4 py-2 rounded-lg bg-royal text-white text-xs font-heading font-bold shrink-0"
+                  >
+                    Share the group win
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

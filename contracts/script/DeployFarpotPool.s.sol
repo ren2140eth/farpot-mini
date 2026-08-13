@@ -108,7 +108,7 @@ contract DeployFarpotPool is Script {
         require(pool.referralWallet() == referral, "deployed referralWallet mismatch - REVENUE PATH");
         // The invariant that matters: whoever signed, the pool ends up owned by POOL_OWNER.
         require(pool.owner() == expectedOwner, "deployed owner mismatch");
-        require(!pool.paused(), "deployed paused");
+        require(pool.paused(), "deployed unpaused - migration race window is open");
 
         // An empty pool for the live drawing must be Accumulating (1) — the lifecycle is derived,
         // so this also proves the dependency graph reads cleanly from the deployed address.

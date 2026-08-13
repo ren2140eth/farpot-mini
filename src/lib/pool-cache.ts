@@ -51,9 +51,11 @@ function client(): Redis {
   return redis;
 }
 
-// Bump to invalidate every cached entry at once. A schema change without a bump would leave
-// old-shaped values in place and there is no migration path for a cache.
-const V = "v1";
+// Bumped v1 → v2 for the sponsor-capable pool redeploy. NONE of these keys contains the pool
+// address, so every one of them describes the previous contract after a redeploy. Bumping the
+// namespace orphans all of them at once; deleting an enumerated list would eventually miss one.
+// Bump again on any future pool redeploy.
+const V = "v2";
 const CURSOR_KEY = `mm:pool:${V}:cursor`;
 const LOCK_KEY = `mm:pool:${V}:lock`;
 const addrsKey = (drawingId: bigint) => `mm:pool:${V}:addrs:${drawingId}`;
@@ -61,6 +63,12 @@ const addrsKey = (drawingId: bigint) => `mm:pool:${V}:addrs:${drawingId}`;
 // the forward index, so it costs no extra RPC and can never disagree with it.
 const mineKey = (address: string) => `mm:pool:${V}:mine:${address.toLowerCase()}`;
 const frozenKey = (drawingId: bigint) => `mm:pool:${V}:frozen:${drawingId}`;
+// Sponsors are stored SEPARATELY from contributors and deliberately do NOT feed `mineKey` — see
+// `addSponsors` below.
+const sponsorsKey = (drawingId: bigint) => `mm:pool:${V}:sponsors:${drawingId}`;
+// Reverse index for sponsors, mirroring `mineKey` exactly but under its OWN key so it never
+// merges with the joiner reverse index — see `addSponsorDrawings` below.
+const sponsorMineKey = (address: string) => `mm:pool:${V}:sponsormine:${address.toLowerCase()}`;
 
 // ── cron crank + monitoring state (Phase 9) ────────────────────────────────────────────────
 // Lowest drawing id not yet known to be fully drained. Purely a "where to start looking" hint:
@@ -158,6 +166,53 @@ export async function getContributorDrawings(address: string): Promise<bigint[]>
 
 export async function getContributors(drawingId: bigint): Promise<string[]> {
   return (await client().smembers<string[]>(addrsKey(drawingId))) ?? [];
+}
+
+/**
+ * Sponsors are stored SEPARATELY from contributors, and deliberately do NOT feed the `mine`
+ * reverse index. Folding them in would surface sponsor-only drawings as joiner claim history,
+ * offering the user a claim path that correctly pays zero.
+ */
+export async function addSponsors(drawingId: bigint, addresses: string[]): Promise<void> {
+  if (addresses.length === 0) return;
+  const members = addresses.map((a) => a.toLowerCase());
+  await client().sadd(sponsorsKey(drawingId), members[0], ...members.slice(1));
+}
+
+export async function getSponsors(drawingId: bigint): Promise<string[]> {
+  return (await client().smembers<string[]>(sponsorsKey(drawingId))) ?? [];
+}
+
+/**
+ * Record which drawings a wallet has sponsored. Mirrors `addContributorDrawings` exactly — same
+ * commands, same lowercasing, same null handling — under the SEPARATE `sponsorMineKey`, so a
+ * sponsor-only drawing can never be discovered through the joiner reverse index (`mineKey`) and
+ * render as a joiner row that pays zero. See `addSponsors` above for why the forward indexes are
+ * split the same way.
+ *
+ * Exists for the same reachability reason as `addContributorDrawings`: without it, a sponsor-only
+ * drawing older than the recent lookback window is undiscoverable, and the zero-joiner fallback
+ * `sponsorShareOf` pays out is unreachable from the UI even though `claim()` has no expiry.
+ */
+export async function addSponsorDrawings(address: string, drawingIds: bigint[]): Promise<void> {
+  if (drawingIds.length === 0) return;
+  const members = drawingIds.map((d) => d.toString());
+  await client().sadd(sponsorMineKey(address), members[0], ...members.slice(1));
+}
+
+/** Every drawing this wallet has sponsored, oldest-first ordering not guaranteed. */
+export async function getSponsorDrawings(address: string): Promise<bigint[]> {
+  const raw = (await client().smembers<string[]>(sponsorMineKey(address))) ?? [];
+  return raw
+    .map((d) => {
+      try {
+        return BigInt(d);
+      } catch {
+        return null;
+      }
+    })
+    .filter((d): d is bigint => d !== null)
+    .sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
 }
 
 /**

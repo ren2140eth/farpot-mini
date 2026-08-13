@@ -42,6 +42,14 @@ function safeText(value: string | null, fallback: string, maxLength: number) {
   return cleaned || fallback;
 }
 
+// Farcaster handles contain underscores, which the shared `safeText` strips (its allowlist is
+// deliberately narrow for the amount field). A separate variant so widening one never widens
+// the other. Returns null (not a fallback string) so callers can omit the sponsor line entirely.
+function safeHandle(value: string | null, maxLength: number) {
+  const cleaned = value?.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, maxLength);
+  return cleaned || null;
+}
+
 function Star({
   size,
   fill,
@@ -67,6 +75,9 @@ function Star({
 
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
+  const mode = params.get("mode") === "group" ? "group" : "solo";
+
+  // Solo (single-ticket win) fields.
   const amount = safeText(params.get("amount"), "0", 18);
   const winningTickets = Math.max(1, Math.min(99, Number(params.get("won")) || 1));
   const totalTickets = Math.max(
@@ -74,11 +85,19 @@ export async function GET(request: Request) {
     Math.min(99, Number(params.get("tickets")) || winningTickets),
   );
 
+  // Group (pool win) fields. `pot`/`contributorCount` come from the CONTRACT (`poolOf`), never
+  // the Data API — see page.tsx's handleClaimPool. No per-person share line: the card is
+  // identical for every member of a winning pool, which is what lets them share one CDN render.
+  const pot = safeText(params.get("pot"), "0", 18);
+  const players = Math.max(1, Math.min(999_999, Number(params.get("players")) || 1));
+  const sponsor = safeHandle(params.get("sponsor"), 32);
+
   const { wordmark, anton, archivoBold, archivoExtraBold } = await loadAssets();
 
   // "$2" renders at 230px; long amounts shrink to stay inside the 720px
-  // content width (Anton digits are ~0.58em wide).
-  const amountText = `$${amount}`;
+  // content width (Anton digits are ~0.58em wide). Shared by both modes so a long
+  // group pot auto-shrinks exactly like a long solo win — one formula, not two.
+  const amountText = mode === "group" ? `$${pot}` : `$${amount}`;
   const amountSize = Math.max(
     92,
     Math.min(230, Math.floor(720 / (0.58 * amountText.length))),
@@ -116,7 +135,7 @@ export async function GET(request: Request) {
             color: "#f5c525",
           }}
         >
-          I JUST WON
+          {mode === "group" ? "OUR GROUP WON" : "I JUST WON"}
         </span>
         <span
           style={{
@@ -140,18 +159,50 @@ export async function GET(request: Request) {
           gap: 10,
         }}
       >
-        <span
-          style={{
-            fontFamily: "Archivo",
-            fontWeight: 800,
-            fontSize: 30,
-            letterSpacing: 1.2,
-            color: "#f3eee4",
-          }}
-        >
-          {winningTickets} WINNING TICKET{winningTickets === 1 ? "" : "S"}
-          {totalTickets > winningTickets ? ` OUT OF ${totalTickets}` : ""}
-        </span>
+        {mode === "group" ? (
+          // A React Fragment here would NOT stack its children in the column: satori laid the
+          // two lines out side by side instead of one-under-the-other. An explicit flex div
+          // (matching every other multi-child container on this card) fixes it.
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+            <span
+              style={{
+                fontFamily: "Archivo",
+                fontWeight: 800,
+                fontSize: 30,
+                letterSpacing: 1.2,
+                color: "#f3eee4",
+              }}
+            >
+              {players} PLAYER{players === 1 ? "" : "S"}
+            </span>
+            {sponsor && (
+              <span
+                style={{
+                  fontFamily: "Archivo",
+                  fontWeight: 700,
+                  fontSize: 20,
+                  letterSpacing: 1.2,
+                  color: "#f5c525",
+                }}
+              >
+                SPONSORED BY @{sponsor}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span
+            style={{
+              fontFamily: "Archivo",
+              fontWeight: 800,
+              fontSize: 30,
+              letterSpacing: 1.2,
+              color: "#f3eee4",
+            }}
+          >
+            {winningTickets} WINNING TICKET{winningTickets === 1 ? "" : "S"}
+            {totalTickets > winningTickets ? ` OUT OF ${totalTickets}` : ""}
+          </span>
+        )}
         <span
           style={{
             fontFamily: "Archivo",
