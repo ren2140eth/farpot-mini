@@ -33,6 +33,7 @@ import {
   POOL_STATE,
   POOL_SOFT_CAP_USDC,
   POOL_SPONSOR_SOFT_CAP_USDC,
+  POOL_SPONSOR_BILLING_MIN_USDC,
   POOL_FIRST_DRAWING,
   POOL_HISTORY_LOOKBACK,
 } from "@/lib/constants";
@@ -937,6 +938,10 @@ export default function Home() {
   const [poolRefresh, setPoolRefresh] = useState(0);
   const [contributors, setContributors] = useState<PoolContributor[]>([]);
   const [contributorsDegraded, setContributorsDegraded] = useState(false);
+  // The per-address sponsor list from the same route, used to pick who the hero
+  // line names (see billedSponsor below) — distinct from sponsorsOf's aggregate
+  // totals, which stay reliable even when this list is empty or degraded.
+  const [sponsors, setSponsors] = useState<PoolContributor[]>([]);
   const [yourPoolDrawings, setYourPoolDrawings] = useState<bigint[]>([]);
   const [yourSponsoredDrawings, setYourSponsoredDrawings] = useState<bigint[]>([]);
   const [poolClaimError, setPoolClaimError] = useState("");
@@ -1060,6 +1065,33 @@ export default function Home() {
     // row next to the face pile.
     return `${name(contributors[0])} and ${n - 1} others are in`;
   })();
+
+  // Billing follows SIZE, with a floor and a deterministic tie-break. "Largest wins" alone sets
+  // only a relative price — in an otherwise unsponsored drawing a single $1 ticket would buy the
+  // headline — and without a tie rule, cache and log ordering silently decides whose name sits on
+  // the app. Sponsors below the floor still count in the totals (sponsoredTickets/sponsorCount);
+  // they just get no headline.
+  const billedSponsor = useMemo(() => {
+    const eligible = sponsors.filter(
+      (s) => BigInt(s.tickets) * poolTicketPrice >= POOL_SPONSOR_BILLING_MIN_USDC,
+    );
+    if (eligible.length === 0) return null;
+    // Weight desc, then address asc. The second key is what makes this deterministic: the
+    // sponsor list comes out of a Redis Set, so its arrival order is arbitrary and a
+    // weight-only sort would let cache ordering pick the winner between equal sponsors.
+    return [...eligible].sort((a, b) => {
+      const byWeight = Number(BigInt(b.tickets) - BigInt(a.tickets));
+      if (byWeight !== 0) return byWeight;
+      return a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1;
+    })[0];
+  }, [sponsors, poolTicketPrice]);
+  // "a sponsor" fallback covers sponsors-exist-but-none-above-floor: sponsoredTickets > 0
+  // while billedSponsor is null.
+  const sponsorHeroName = billedSponsor
+    ? billedSponsor.username
+      ? `@${billedSponsor.username}`
+      : `${billedSponsor.address.slice(0, 6)}…${billedSponsor.address.slice(-4)}`
+    : "a sponsor";
   const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
   // Same USDC allowance as join — both spend from the wallet's approval to FARPOT_POOL_ADDRESS,
   // only the quantity (and so the cost) differs. `undefined` means NEEDS approval, never "no
@@ -1081,6 +1113,7 @@ export default function Home() {
         if (cancelled) return;
         setContributors(body.contributors ?? []);
         setContributorsDegraded(Boolean(body.degraded));
+        setSponsors(body.sponsors ?? []);
         setYourPoolDrawings(
           ((body.yourDrawings ?? []) as string[]).map((d) => BigInt(d)),
         );
@@ -1091,6 +1124,7 @@ export default function Home() {
         if (cancelled) return;
         setContributors([]);
         setContributorsDegraded(true);
+        setSponsors([]);
         setYourPoolDrawings([]);
         setYourSponsoredDrawings([]);
       }
@@ -3160,6 +3194,23 @@ export default function Home() {
             <p className="text-mut text-xs text-center">
               Everyone&rsquo;s tickets ride together — the pot splits by how many you put in.
             </p>
+
+            {/* Sponsored hero line — shown whenever this draw has ANY sponsored tickets,
+                independent of whether one cleared the billing floor (see billedSponsor
+                above). This is the one place on the tab where the "no better odds" copy
+                rule does NOT apply: a sponsored draw is genuinely +EV for joiners, because
+                sponsored tickets ride in the pot but pay out only to joiners. Both lines
+                share the same gate so they always appear together. */}
+            {sponsoredTickets > BigInt(0) && (
+              <div className="mt-3 space-y-1 text-center">
+                <p className="pool-dimmer text-[11px]">
+                  {`${sponsoredTickets.toString()} sponsored ticket${sponsoredTickets === BigInt(1) ? "" : "s"} from ${sponsorHeroName} — free odds for everyone in`}
+                </p>
+                <p className="text-wins-green text-[11px] font-semibold">
+                  {`Sponsored tickets pay out to joiners, so joining a sponsored pool is better than buying alone.`}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Join — the same surface as the Play tab's ticket panel, so the
