@@ -51,11 +51,12 @@ function client(): Redis {
   return redis;
 }
 
-// Bumped v1 → v2 for the sponsor-capable pool redeploy. NONE of these keys contains the pool
+// Bumped v1 → v2 for the sponsor-capable pool redeploy, then v2 → v3 when that pool was itself
+// replaced to move ownership off a personal wallet. NONE of these keys contains the pool
 // address, so every one of them describes the previous contract after a redeploy. Bumping the
 // namespace orphans all of them at once; deleting an enumerated list would eventually miss one.
 // Bump again on any future pool redeploy.
-const V = "v2";
+const V = "v3";
 const CURSOR_KEY = `mm:pool:${V}:cursor`;
 const LOCK_KEY = `mm:pool:${V}:lock`;
 const addrsKey = (drawingId: bigint) => `mm:pool:${V}:addrs:${drawingId}`;

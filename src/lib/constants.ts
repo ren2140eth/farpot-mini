@@ -19,34 +19,42 @@ export const REFERRAL_WALLET = "0xeEeC2d83DA24512D37410F7cA5B18FD805fB79d2" as c
 
 // FarpotPool — the group-buy pool contract (contracts/src/FarpotPool.sol).
 // Deployed to Base 2026-08-13, source-verified on Sourcify with an EXACT match
-// (creation and runtime): https://repo.sourcify.dev/8453/0xfBE555a34066E10464f28ce9b46D862aD8031906
-// The owner's only power is pause()/unpause(), which blocks
-// join() alone — claimBatch() and claim() keep working while paused, so pausing can never
-// strand funds. All five constructor dependencies were read back off-chain and match the
-// addresses above.
+// (creation and runtime): https://repo.sourcify.dev/8453/0xc51ba130681a5ee88C85438176B5b04aaA77ADf3
+// All five constructor dependencies were read back off-chain and match the addresses above.
 //
-// This REPLACES 0x0F28287571E0e81a4352594B6D2e46761A88D320, which had no sponsor surface
-// (`sponsorsOf` and `sponsorShareOf` revert on it). The old pool was drained and retired
-// first: drawings 141 and 142 both Settled with the claim cursor fully advanced, every
-// entitlement at zero, and only one atomic unit of `fullMulDiv` rounding dust left behind.
+// The owner is a DEDICATED DEPLOY KEY, not a personal wallet — deliberately. The owner's only
+// powers are pause()/unpause() and the Ownable transfer/renounce pair; there is no owner path
+// to any funds, and claim()/claimBatch() have no owner gate at all, so they keep working while
+// paused. The worst a compromised owner key can do is freeze new joins, which is a product
+// outage rather than a loss. Holding it on a machine key instead of a phone wallet is what
+// makes pausing scriptable — an anomaly monitor can pause without waiting for a human.
+//
+// This REPLACES two earlier pools. 0x0F28287571E0e81a4352594B6D2e46761A88D320 had no sponsor
+// surface at all (`sponsorsOf` and `sponsorShareOf` revert on it); it was drained and retired
+// first, with drawings 141 and 142 both Settled, the claim cursor fully advanced, every
+// entitlement at zero and one atomic unit of `fullMulDiv` dust left behind.
+// 0xfBE555a34066E10464f28ce9b46D862aD8031906 was sponsor-capable but owned by a personal
+// wallet, and `transferOwnership` is itself `onlyOwner` — so moving ownership would have cost
+// exactly the signature the move existed to avoid. It was never unpaused and never held a
+// ticket, so replacing it discarded nothing.
 //
 // Moving this address REQUIRES bumping `V` in pool-cache.ts in the SAME push. The cache keys
-// are namespaced by V, not by address, so a repoint without a bump would serve the old pool's
-// cached contributor lists under the new contract. It also resets the contributors route's
-// cold-rebuild window, which is measured from FARPOT_POOL_DEPLOY_BLOCK below.
-export const FARPOT_POOL_ADDRESS = "0xfBE555a34066E10464f28ce9b46D862aD8031906" as const;
+// are namespaced by V, not by address, so a repoint without a bump would serve a previous
+// pool's cached contributor lists under the new contract. It also resets the contributors
+// route's cold-rebuild window, measured from FARPOT_POOL_DEPLOY_BLOCK below.
+export const FARPOT_POOL_ADDRESS = "0xc51ba130681a5ee88C85438176B5b04aaA77ADf3" as const;
 
 // The block FarpotPool was deployed in, taken from the transaction receipt
-// (0xb52ec27c…6f71d). This is the cold-cache `fromBlock` for any Joined-log scan — never
+// (0xb1d7abe8…68bd0). This is the cold-cache `fromBlock` for any Joined-log scan — never
 // use 0, which would scan the whole chain.
 //
 // Do NOT take this from the deploy script's console output: that line prints the block the
-// SIMULATION ran against (it said 49927142), while the transaction actually mined in 49927357.
-// The same trap caught the previous deploy, which simulated at 49497965 and mined in 49497969.
-// `BigInt(…)` rather than a `49927357n` literal: tsconfig targets ES2017, which rejects
+// SIMULATION ran against, while the transaction mines a few blocks later. Every deploy so far
+// has shown the gap — 49497965 vs 49497969, and 49927142 vs 49927357.
+// `BigInt(…)` rather than a `49928206n` literal: tsconfig targets ES2017, which rejects
 // BigInt literal syntax outright ("BigInt literals are not available when targeting lower
 // than ES2020"). The value is a bigint either way, which is what viem's `fromBlock` wants.
-export const FARPOT_POOL_DEPLOY_BLOCK = BigInt(49927357);
+export const FARPOT_POOL_DEPLOY_BLOCK = BigInt(49928206);
 
 // FarpotPool ABI — only what the app actually calls, transcribed from
 // contracts/src/interfaces/IFarpotPool.sol (the compiler-enforced surface).
