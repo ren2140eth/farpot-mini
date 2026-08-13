@@ -3512,12 +3512,19 @@ export default function Home() {
                                 </button>
                               );
                             default:
-                              /* Settled with nothing owed: this drawing had a joiner (the
-                                 fallback never triggered), so the sponsorship correctly earns
-                                 no separate payout beyond the pot it contributed to. */
+                              /* Settled with nothing owed via the sponsor class. This covers
+                                 two on-chain-distinct cases the row cannot tell apart without
+                                 reading poolOf(drawingId).tickets (deliberately out of scope —
+                                 see the Task 11B review): other people joined and the
+                                 sponsorship did its job (whether or not their ticket won), OR
+                                 nobody joined and the group's ticket genuinely lost. "No win
+                                 this draw" is FALSE in the first case whenever the joiners won,
+                                 and contradicts the standing rule below (a sponsor must never
+                                 be told they got nothing) — say only what this read proves: no
+                                 payout via the sponsor class. */
                               return (
                                 <span className="pool-dimmer text-xs font-heading font-bold">
-                                  No win this draw
+                                  No sponsor payout this draw
                                 </span>
                               );
                           }
