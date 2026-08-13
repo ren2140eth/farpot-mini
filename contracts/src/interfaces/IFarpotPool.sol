@@ -200,6 +200,16 @@ interface IFarpotPool {
     /// @notice Take your pro-rata share of each fully-settled drawing in `drawingIds`.
     /// @dev Duplicate ids within one call pay once. A zero entitlement is a no-op, not a
     ///      revert. Not blocked by `paused`.
+    ///
+    ///      Claimant-class flip: a drawing's joiners are its claimants UNLESS the drawing
+    ///      ended with no joiner weight at all (`totalTickets == 0`), in which case its
+    ///      SPONSORS become the claimants instead, splitting the drawing's own pot by
+    ///      sponsored weight (`sponsoredByUser` / `totalSponsored`) rather than joiner weight.
+    ///      This is a per-drawing, per-call decision — each id in `drawingIds` is evaluated
+    ///      independently, so one call can pay one drawing via the joiner class and another
+    ///      via the sponsor fallback. There is no third class and no partial credit across
+    ///      classes: a wallet that both joined and sponsored the SAME drawing is paid only as
+    ///      a joiner, because `totalTickets != 0` in that case by construction.
     function claim(uint256[] calldata drawingIds) external;
 
     /*//////////////////////////////////////////////////////////////
@@ -242,9 +252,17 @@ interface IFarpotPool {
     function sponsorsOf(uint256 drawingId) external view returns (uint256 tickets, uint256 sponsors);
 
     /// @notice A sponsor's position in `drawingId`.
-    /// @dev `owed` is non-zero ONLY when the drawing ended with no joiner weight at all — the
-    ///      zero-joiner fallback. `hasClaimed` is the SAME flag `shareOf` reports: the two
-    ///      claimant classes are mutually exclusive per drawing, so one flag serves both.
+    /// @return tickets Always the immutable historical sponsored weight, retained after
+    ///         claiming.
+    /// @return owed Non-zero ONLY when the drawing ended with no joiner weight at all — the
+    ///         zero-joiner fallback (see `claim`) — AND is otherwise subject to the exact same
+    ///         timing rule `shareOf.owed` documents: zero before settlement, a PARTIAL figure
+    ///         while the drawing is `Claimable` (because `pot` is still accumulating as
+    ///         `claimBatch` drains it), and the final floor entitlement only once `Settled`.
+    ///         The UI must show a payout figure ONLY when `poolStateOf == Settled`, same as
+    ///         the joiner path.
+    /// @return hasClaimed The SAME flag `shareOf` reports: the two claimant classes are
+    ///         mutually exclusive per drawing, so one flag serves both.
     function sponsorShareOf(uint256 drawingId, address who)
         external
         view
