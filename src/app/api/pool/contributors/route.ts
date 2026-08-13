@@ -43,16 +43,46 @@ export const dynamic = "force-dynamic";
 const REVALIDATE_SECONDS = 30;
 
 // Public Base RPCs cap `eth_getLogs` ranges; 10k is the documented safe chunk.
-const CHUNK = BigInt(10_000);
+//
+// Overridable alongside MAX_CHUNKS_PER_REQUEST below, and for the same reason: shrinking the
+// chunk is how a test forces a multi-chunk scan over a short chain, without mining tens of
+// thousands of blocks onto a fork (which takes minutes and times out the RPC). It also leaves
+// room to tune down for an RPC provider with a stricter range cap.
+// Bracket access, deliberately: Next statically replaces dotted `process.env.FOO` in bundled
+// code, and a var absent from the .env files is inlined as `undefined` — so the `??` default
+// would win even when the value IS set in the running process's environment. That silently
+// defeated this knob on the first attempt, with the harness passing its env through correctly.
+const CHUNK = BigInt(Number(process.env["POOL_SCAN_CHUNK"] ?? 10_000));
 
 // Only blocks this far behind the head advance the cursor, so a short reorg re-scans its
 // range instead of baking an orphaned log into the cache.
 const CONFIRMATIONS = BigInt(2);
 
-// Ceiling on a single cold rebuild. Without a cache the scan starts at the deployment block
-// every time, and that range grows forever — the exact unbounded-rescan problem the cursor
-// exists to solve. Past this, serve numbers-only rather than hammer the RPC.
-const MAX_COLD_BLOCKS = BigInt(500_000);
+// Ceiling on how much ONE request scans, so a cold rebuild is bounded per request rather than
+// refused outright.
+//
+// This replaced a hard `MAX_COLD_BLOCKS` refusal, which was a permanent fuse rather than a
+// safety valve: refusing to scan meant never writing a cursor, so the next request restarted at
+// the deployment block and refused again, identically, forever. Once the pool aged past that
+// ceiling, any cache eviction degraded the avatar row with no path back short of a redeploy.
+//
+// Bounding the work instead is safe because `scan` already persists the cursor after each
+// chunk, so an early return is a pause, not a loss. A caught-up request costs one chunk; only a
+// genuine cold rebuild pays more, and it converges over a few requests because the degraded
+// response is `no-store` and the next view resumes immediately.
+//
+// 20 × 10k = 200k blocks per request, ~4.6 days of Base chain. Sized against the 120s cache
+// lock TTL (pool-cache.ts), not the function timeout: overrunning the lock would let a second
+// instance scan concurrently — wasteful rather than wrong, since the writes are idempotent and
+// the cursor only advances over fully-processed ranges, but worth staying inside.
+//
+// Overridable purely so it can be TESTED. The multi-request resume path only runs when a scan
+// exceeds this budget, and a pool would need months of history to exceed 200k blocks — so
+// without a knob the one branch that matters here could never be exercised before it was
+// needed in anger, which is precisely how the fuse this replaced went unnoticed. Production
+// leaves it unset; `pool-scan-proof.mjs` forces it to 1.
+// Bracket access for the same reason as CHUNK above.
+const MAX_CHUNKS_PER_REQUEST = Number(process.env["POOL_MAX_CHUNKS_PER_REQUEST"] ?? 20);
 
 const JOINED_EVENT = FARPOT_POOL_ABI.find(
   (entry) => entry.type === "event" && entry.name === "Joined",
@@ -90,18 +120,20 @@ interface NeynarBulkUser {
  * contributor indexes. `Sponsored` logs feed ONLY the sponsor set — never the reverse index —
  * so a sponsor-only drawing never offers a joiner claim path that correctly pays zero.
  */
-async function scan(confirmedHead: bigint): Promise<void> {
+async function scan(confirmedHead: bigint): Promise<boolean> {
   const cursor = await getCursor();
   let from = cursor === null ? FARPOT_POOL_DEPLOY_BLOCK : cursor + BigInt(1);
 
-  if (cursor === null && confirmedHead - from > MAX_COLD_BLOCKS) {
-    throw new Error(
-      `cold rebuild would span ${confirmedHead - from} blocks (max ${MAX_COLD_BLOCKS})`,
-    );
-  }
-  if (from > confirmedHead) return;
+  if (from > confirmedHead) return true;
 
+  let chunks = 0;
   while (from <= confirmedHead) {
+    // Out of budget for this request. The cursor is already persisted through the last
+    // COMPLETED chunk, so the next request resumes from exactly here — nothing is rescanned
+    // and nothing is skipped. Returning false is what stops the caller treating a partial
+    // cache as authoritative.
+    if (chunks >= MAX_CHUNKS_PER_REQUEST) return false;
+
     const to = from + CHUNK - BigInt(1) > confirmedHead ? confirmedHead : from + CHUNK - BigInt(1);
     const logs = await client.getLogs({
       address: FARPOT_POOL_ADDRESS,
@@ -163,7 +195,10 @@ async function scan(confirmedHead: bigint): Promise<void> {
     await setCursor(to);
 
     from = to + BigInt(1);
+    chunks++;
   }
+
+  return true;
 }
 
 async function resolveIdentities(addresses: string[]): Promise<Map<string, NeynarBulkUser>> {
@@ -238,7 +273,10 @@ export async function GET(request: Request) {
     } else {
       lockToken = await acquireLock();
       if (lockToken) {
-        await scan(confirmedHead);
+        // False means the scan ran out of its per-request budget mid-rebuild. The cache is
+        // genuinely partial, so it must not be frozen and must not be served as complete —
+        // fall through to the degraded response and let the next request resume the scan.
+        const reachedHead = await scan(confirmedHead);
 
         // Freeze check — §5's three conditions, satisfied together.
         //
@@ -248,15 +286,17 @@ export async function GET(request: Request) {
         // in which a `Joined(drawingId, …)` could exist is behind the cursor. Reading at
         // `latest` would let a rollover in the last two (unconfirmed) blocks freeze a list
         // before its final joins were scanned, losing late joiners permanently.
-        const idAtConfirmedHead = await client.readContract({
-          address: JACKPOT_ADDRESS,
-          abi: JACKPOT_ABI,
-          functionName: "currentDrawingId",
-          blockNumber: confirmedHead,
-        });
-        if (idAtConfirmedHead > drawingId) await freezeDrawing(drawingId);
-        // We just scanned to confirmedHead ourselves, so the cache is current by construction.
-        complete = true;
+        if (reachedHead) {
+          const idAtConfirmedHead = await client.readContract({
+            address: JACKPOT_ADDRESS,
+            abi: JACKPOT_ABI,
+            functionName: "currentDrawingId",
+            blockNumber: confirmedHead,
+          });
+          if (idAtConfirmedHead > drawingId) await freezeDrawing(drawingId);
+          // We just scanned to confirmedHead ourselves, so the cache is current by construction.
+          complete = true;
+        }
       } else {
         // Another instance holds the lock. Duplicating its scan would be waste, so instead ask
         // whether the cache is ALREADY current: if the cursor has reached this request's
