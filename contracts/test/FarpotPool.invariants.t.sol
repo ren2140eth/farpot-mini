@@ -343,6 +343,16 @@ contract FarpotPoolInvariantsTest is Test {
         assertGe(handler.okMarkWinners(), 1, "coverage: pots were always zero, so I5/I7 proved nothing");
         assertGe(handler.okClaimBatch(), 2, "coverage: claimBatch never exercised");
         assertGe(handler.okClaim(), 1, "coverage: claim never reached");
+        // okClaim alone is satisfiable entirely by fallback claims (the handler can spend a
+        // whole run chasing the sponsor-only lane once it starts biting), which would leave
+        // the ordinary joiner path — most of what `claim` does — completely unexercised while
+        // every floor above stayed green. Require at least one claim NOT accounted for by the
+        // fallback counter, i.e. at least one genuine joiner-class claim.
+        assertGe(
+            handler.okClaim() - handler.okSponsorFallbackClaim(),
+            1,
+            "coverage: claim never reached via the ordinary joiner class"
+        );
         assertGe(handler.distinctFundedDrawings(), 1, "coverage: no drawing was ever funded");
         assertGe(handler.maxCoexistingUnclaimedPots(), 1, "coverage: no pot was ever left unclaimed");
 
