@@ -371,11 +371,15 @@ export async function GET(request: Request) {
         });
       });
 
-      // Deliberately NOT sorted, unlike contributors: a later feature breaks a billing tie by
-      // "earliest sponsor at the maximum weight", derived from the order this route returns.
-      // (`sponsorAddresses` itself comes back from a Redis Set via `getSponsors`, which does not
-      // guarantee insertion order — see pool-cache.ts. This preserves whatever order arrives
-      // rather than compounding the loss with a second re-sort.)
+      // Deliberately NOT sorted, unlike contributors: `sponsorAddresses` comes back from a
+      // Redis Set via `getSponsors`, which does not guarantee insertion order (see
+      // pool-cache.ts), so arrival order here is not meaningful and re-sorting it would only
+      // dress up an arbitrary order as though it meant something. The one consumer that picks
+      // a single sponsor to bill — `pickBilledSponsor` in page.tsx — does not rely on this
+      // route's order at all: it applies its own total order (weight desc, then address asc)
+      // over whatever list arrives, which is deterministic regardless of arrival order. Keep
+      // ordering out of this route's contract; push any future tie-break rule into the
+      // consumer the same way.
     }
 
     return NextResponse.json(
