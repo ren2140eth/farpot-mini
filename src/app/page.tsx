@@ -565,6 +565,29 @@ function BottomNav({ activeTab, onTabChange, hasClaimable }: { activeTab: TabKey
   );
 }
 
+// Which sponsor gets billed on the hero line / group-win share card, given a drawing's
+// sponsor list. Pulled out to a pure top-level function (rather than living only inside the
+// `billedSponsor` useMemo) so the group-win share path can run the SAME selection against a
+// past drawing's sponsor list without a second, driftable copy of the rule.
+//
+// Weight desc, then address asc. The second key is what makes this deterministic: the sponsor
+// list comes out of a Redis Set, so its arrival order is arbitrary and a weight-only sort would
+// let cache ordering pick the winner between equal sponsors.
+function pickBilledSponsor(
+  sponsors: PoolContributor[],
+  ticketPrice: bigint,
+): PoolContributor | null {
+  const eligible = sponsors.filter(
+    (s) => BigInt(s.tickets) * ticketPrice >= POOL_SPONSOR_BILLING_MIN_USDC,
+  );
+  if (eligible.length === 0) return null;
+  return [...eligible].sort((a, b) => {
+    const byWeight = Number(BigInt(b.tickets) - BigInt(a.tickets));
+    if (byWeight !== 0) return byWeight;
+    return a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1;
+  })[0];
+}
+
 // ── Component ────────────────────────────────────────────────
 
 export default function Home() {
@@ -946,6 +969,15 @@ export default function Home() {
   const [yourSponsoredDrawings, setYourSponsoredDrawings] = useState<bigint[]>([]);
   const [poolClaimError, setPoolClaimError] = useState("");
   const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
+  // Set after a successful group claim, from `poolOf(drawingId)` — the pool's TOTAL pot and
+  // headcount for that drawing, never the wallet's own share (which is all `shareOf` gives).
+  // Feeds the "Share the group win" button; null hides it, same as the ticket-claim share path.
+  const [lastGroupWin, setLastGroupWin] = useState<{
+    drawingId: bigint;
+    pot: bigint;
+    contributorCount: bigint;
+    sponsorHandle: string | null;
+  } | null>(null);
 
   const poolArgs = currentDrawingId !== undefined ? ([currentDrawingId] as const) : undefined;
 
@@ -1071,20 +1103,10 @@ export default function Home() {
   // headline — and without a tie rule, cache and log ordering silently decides whose name sits on
   // the app. Sponsors below the floor still count in the totals (sponsoredTickets/sponsorCount);
   // they just get no headline.
-  const billedSponsor = useMemo(() => {
-    const eligible = sponsors.filter(
-      (s) => BigInt(s.tickets) * poolTicketPrice >= POOL_SPONSOR_BILLING_MIN_USDC,
-    );
-    if (eligible.length === 0) return null;
-    // Weight desc, then address asc. The second key is what makes this deterministic: the
-    // sponsor list comes out of a Redis Set, so its arrival order is arbitrary and a
-    // weight-only sort would let cache ordering pick the winner between equal sponsors.
-    return [...eligible].sort((a, b) => {
-      const byWeight = Number(BigInt(b.tickets) - BigInt(a.tickets));
-      if (byWeight !== 0) return byWeight;
-      return a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1;
-    })[0];
-  }, [sponsors, poolTicketPrice]);
+  const billedSponsor = useMemo(
+    () => pickBilledSponsor(sponsors, poolTicketPrice),
+    [sponsors, poolTicketPrice],
+  );
   // "a sponsor" fallback covers sponsors-exist-but-none-above-floor: sponsoredTickets > 0
   // while billedSponsor is null.
   const sponsorHeroName = billedSponsor
@@ -1451,6 +1473,36 @@ export default function Home() {
         haptics.success();
         refetchPastPools();
         refetchUsdcBalance();
+
+        // Group-win share data: the drawing's TOTAL pot and headcount (poolOf), never the
+        // wallet's own share — shareOf/sponsorShareOf only carry that. Best-effort: a failure
+        // here must never surface as a claim error, since the claim itself already went
+        // through above. Sponsor credit is a second best-effort layer inside the first, so a
+        // sponsor-lookup failure still leaves the pot/headcount share intact.
+        try {
+          const poolOfResult = await readContract(config, {
+            address: FARPOT_POOL_ADDRESS,
+            abi: FARPOT_POOL_ABI,
+            functionName: "poolOf",
+            args: [drawingId],
+          });
+          const [, contributorCount, potAmount] = poolOfResult;
+          let sponsorHandle: string | null = null;
+          try {
+            const res = await fetch(`/api/pool/contributors?drawingId=${drawingId}`);
+            const body = await res.json();
+            const billed = pickBilledSponsor(
+              (body.sponsors ?? []) as PoolContributor[],
+              poolTicketPrice,
+            );
+            sponsorHandle = billed?.username ?? null;
+          } catch {
+            /* sponsor credit is decorative; the pot/headcount below still stand alone */
+          }
+          setLastGroupWin({ drawingId, pot: potAmount, contributorCount, sponsorHandle });
+        } catch {
+          /* group-win share data is decorative; the claim already succeeded above */
+        }
       } catch (err: unknown) {
         const raw = err instanceof Error ? err.message : String(err);
         haptics.error();
@@ -1465,7 +1517,7 @@ export default function Home() {
         setClaimingDrawing(null);
       }
     },
-    [address, config, refetchPastPools, refetchUsdcBalance],
+    [address, config, poolTicketPrice, refetchPastPools, refetchUsdcBalance],
   );
 
   const handleSharePool = useCallback(() => {
@@ -1478,6 +1530,28 @@ export default function Home() {
     });
   }, [composeCast, poolTickets]);
 
+  const handleShareGroupWin = useCallback(() => {
+    if (!lastGroupWin || lastGroupWin.pot <= BigInt(0)) return;
+    const shareAmount = formatShareUSDC(lastGroupWin.pot);
+    const players = Number(lastGroupWin.contributorCount);
+    const params = new URLSearchParams({
+      mode: "group",
+      pot: shareAmount,
+      players: String(players),
+      // Busts the wrpcd.net CDN cache (immutable, 1y) so a common pot/player combo doesn't
+      // keep serving a stale render across design changes. Bump when the card design changes.
+      v: "3",
+    });
+    if (lastGroupWin.sponsorHandle) params.set("sponsor", lastGroupWin.sponsorHandle);
+    const cardUrl = `${APP_URL}/api/share/win-card?${params.toString()}`;
+    const sponsorSuffix = lastGroupWin.sponsorHandle
+      ? ` — sponsored by @${lastGroupWin.sponsorHandle}`
+      : "";
+    composeCast({
+      text: `Our Farpot group just won $${shareAmount} across ${players} player${players === 1 ? "" : "s"} 🎉${sponsorSuffix}`,
+      embeds: [cardUrl, APP_URL],
+    });
+  }, [composeCast, lastGroupWin]);
 
   const handleShare = useCallback(() => {
     if (!drawingState) return;
@@ -3587,6 +3661,32 @@ export default function Home() {
               )}
 
               {poolClaimError && <p className="text-coral text-sm mt-2">{poolClaimError}</p>}
+
+              {/* Fires after a successful group claim — see handleClaimPool's group-win fetch.
+                  `pot` is the drawing's TOTAL payout (poolOf), never this wallet's own share, so
+                  the card and cast read the same for every member of the winning pool. No
+                  button when the pot came back zero (the decorative fetch failed, or this drawing
+                  genuinely paid nothing via this claim class). */}
+              {lastGroupWin && lastGroupWin.pot > BigInt(0) && (
+                <div className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-white font-heading font-bold text-sm">
+                      Draw #{lastGroupWin.drawingId.toString()} claimed
+                    </p>
+                    <p className="pool-dimmer text-xs">
+                      ${formatUnits(lastGroupWin.pot, USDC_DECIMALS)} across{" "}
+                      {lastGroupWin.contributorCount.toString()} player
+                      {lastGroupWin.contributorCount === BigInt(1) ? "" : "s"}
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleShareGroupWin}
+                    className="px-4 py-2 rounded-lg bg-royal text-white text-xs font-heading font-bold shrink-0"
+                  >
+                    Share the group win
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
