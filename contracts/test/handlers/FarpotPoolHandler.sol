@@ -248,8 +248,9 @@ contract FarpotPoolHandler is CommonBase, StdCheats, StdUtils {
     ///      the chain is made reliable rather than the floor made lax.
     ///
     ///      The steering is deliberately NARROW — it only ever picks among choices the action
-    ///      could already have made, never invents a new one, and it switches off after the
-    ///      first fallback payout, so the rest of every run is the same unbiased walk as before.
+    ///      could already have made, never invents a new one, and it switches off once TWO
+    ///      distinct drawings have paid via the fallback (see WHY TWO DISTINCT DRAWINGS above),
+    ///      so the rest of every run is the same unbiased walk as before.
     function _chasingFallback() internal view returns (bool) {
         return sponsorOnlyPaidDrawings < 2;
     }
