@@ -1295,7 +1295,7 @@ export default function Home() {
       } else if (/PoolLocked/i.test(raw)) {
         setSponsorError("The draw is about to happen, try again shortly.");
       } else if (/Paused/i.test(raw)) {
-        setSponsorError("Joining is paused right now. Existing pools are unaffected.");
+        setSponsorError("Sponsoring is paused right now. Existing pools are unaffected.");
       } else if (/InvalidTicketCount/i.test(raw)) {
         setSponsorError(`You can sponsor up to ${contractCap} tickets at a time.`);
       } else if (/transfer amount exceeds balance|insufficient/i.test(raw)) {
@@ -1487,19 +1487,25 @@ export default function Home() {
             args: [drawingId],
           });
           const [, contributorCount, potAmount] = poolOfResult;
-          let sponsorHandle: string | null = null;
-          try {
-            const res = await fetch(`/api/pool/contributors?drawingId=${drawingId}`);
-            const body = await res.json();
-            const billed = pickBilledSponsor(
-              (body.sponsors ?? []) as PoolContributor[],
-              poolTicketPrice,
-            );
-            sponsorHandle = billed?.username ?? null;
-          } catch {
-            /* sponsor credit is decorative; the pot/headcount below still stand alone */
+          // A sponsor-class fallback claim (contributorCount == 0 — no one ever joined this
+          // drawing) is not a group win: it is a sponsor recovering their own stake alone. The
+          // group-win banner/cast/card must never fire for it — see Fix 1 review — so gate on
+          // the same signal the contract itself uses to distinguish the two claimant classes.
+          if (contributorCount > BigInt(0)) {
+            let sponsorHandle: string | null = null;
+            try {
+              const res = await fetch(`/api/pool/contributors?drawingId=${drawingId}`);
+              const body = await res.json();
+              const billed = pickBilledSponsor(
+                (body.sponsors ?? []) as PoolContributor[],
+                poolTicketPrice,
+              );
+              sponsorHandle = billed?.username ?? null;
+            } catch {
+              /* sponsor credit is decorative; the pot/headcount below still stand alone */
+            }
+            setLastGroupWin({ drawingId, pot: potAmount, contributorCount, sponsorHandle });
           }
-          setLastGroupWin({ drawingId, pot: potAmount, contributorCount, sponsorHandle });
         } catch {
           /* group-win share data is decorative; the claim already succeeded above */
         }
@@ -3414,7 +3420,7 @@ export default function Home() {
 
             {poolPaused ? (
               <p className="pool-dim text-sm mt-3">
-                Joining is paused right now. Existing pools are unaffected.
+                Sponsoring is paused right now. Existing pools are unaffected.
               </p>
             ) : drawingState?.jackpotLock ? (
               <p className="pool-dim text-sm mt-3">
