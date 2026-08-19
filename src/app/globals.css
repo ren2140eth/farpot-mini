@@ -184,8 +184,51 @@ body {
   color: #ffd447;
 }
 
-.segmented-control { background: #eef1f7; border: 1px solid #dfe3ec; }
-.segmented-active { background: linear-gradient(135deg, #ff8066, #f06a4f); color: #fff; box-shadow: 0 5px 12px rgba(240,106,79,.22); }
+/* Segmented control — the Pool tab's Join/Sponsor mode picker. The active
+   segment is royal, the same on-state colour as the "Repeat daily" switch, so
+   the app's two mode controls read as one system. Measured 4.72:1 against white
+   (AA for normal text); the inactive label is --color-mut at 4.62:1 on the
+   track. Coral — the old `.segmented-active`, removed here with its last
+   consumer — is this app's ERROR colour and is the wrong signal for "selected".
+   Equal-width columns via grid, so a longer label can never make one segment
+   wider than the other. */
+.segmented-control {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 16px;
+  background: #eef1f7;
+  border: 1px solid #dfe3ec;
+}
+.segmented-control > button {
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--color-mut);
+  font-family: var(--font-heading), system-ui, sans-serif;
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color .18s ease, color .18s ease, box-shadow .18s ease;
+}
+.segmented-control > button:hover:not([aria-checked="true"]) { color: var(--color-navy); }
+.segmented-control > button[aria-checked="true"] {
+  background: var(--color-royal);
+  color: #fff;
+  box-shadow: 0 4px 10px rgba(133, 93, 205, .28);
+}
+.segmented-control > button:focus-visible {
+  outline: 2px solid var(--color-royal);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .segmented-control > button { transition: none; }
+}
 .soft-panel { background: #fff; border: 1px solid #e1e4ec; box-shadow: 0 8px 24px rgba(19,36,90,.05); }
 
 .number-ticket-preview {
@@ -546,11 +589,6 @@ body {
   box-shadow: 0 20px 46px rgba(52,32,79,.11);
 }
 
-.play-ticket-panel .segmented-control {
-  padding: 5px;
-  border-radius: 16px;
-}
-
 /* Compatibility bridge for the existing component's dark-theme utilities.
    Keeping this scoped lets us reskin without touching transaction logic. */
 .app-shell .text-white { color: #34204f; }
@@ -754,6 +792,27 @@ body {
 [data-theme="midnight"] .segmented-control {
   background: rgba(23, 14, 43, .55);
   border-color: rgba(205, 181, 245, .14);
+}
+/* Midnight flips --color-royal to a PALE lavender (#cdb5f5) so it reads on a dark
+   ground, which means the active segment needs DARK text here, not the white that
+   works in light mode — white on #cdb5f5 measures 1.82:1. #170e2b (the track
+   colour above) gives 10.16:1.
+
+   Both selectors below must exclude the checked state explicitly. Without the
+   :not(), `[data-theme="midnight"] .segmented-control > button` and
+   `.segmented-control > button[aria-checked="true"]` are BOTH specificity (0,2,1),
+   so this block — being later in the file — silently won and painted the active
+   label #b9a8d8 on #cdb5f5: 1.19:1, invisible. Caught in the browser, not the
+   build. Keep the :not() if you touch these rules. */
+[data-theme="midnight"] .segmented-control > button:not([aria-checked="true"]) {
+  color: #b9a8d8;
+}
+[data-theme="midnight"] .segmented-control > button:hover:not([aria-checked="true"]) {
+  color: #f3eee4;
+}
+[data-theme="midnight"] .segmented-control > button[aria-checked="true"] {
+  color: #170e2b;
+  box-shadow: 0 4px 10px rgba(23, 14, 43, .35);
 }
 [data-theme="midnight"] .brand-ball-empty {
   background: rgba(255, 255, 255, .06);

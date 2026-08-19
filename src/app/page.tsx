@@ -952,6 +952,12 @@ export default function Home() {
   // Every number shown on this tab comes from the CONTRACT. The /api/pool
   // route supplies only the list of addresses, so if it fails the tab keeps
   // working and simply hides the faces — it can never show a wrong list.
+  // Which side of the segmented control is showing. Join and Sponsor are two
+  // modes of one action (put USDC into this draw's pot) differing only in who the
+  // winnings pay out to, so they share one panel rather than stacking two
+  // near-identical stepper cards. Purely presentational — each mode still calls
+  // its own untouched handler.
+  const [poolMode, setPoolMode] = useState<"join" | "sponsor">("join");
   const [poolQuantity, setPoolQuantity] = useState(1);
   const [joinPhase, setJoinPhase] = useState<BuyPhase>("idle");
   const [joinError, setJoinError] = useState("");
@@ -1068,6 +1074,22 @@ export default function Home() {
   const sponsorQty = sponsorMaxThisSponsor > 0 ? Math.min(sponsorQuantity, sponsorMaxThisSponsor) : 0;
   const sponsorCost = poolTicketPrice * BigInt(sponsorQty);
 
+  // Everything the merged Join/Sponsor panel needs, selected once by mode so the
+  // JSX below reads as ONE stepper + ONE cap line + ONE button rather than the
+  // two near-identical cards this replaced. The caps are deliberately separate
+  // budgets on-chain (a sponsorship must not eat the joiners' headroom), so
+  // `atCap` is per-mode: a full join budget still leaves the Sponsor side usable,
+  // which is why the segmented control stays live while a cap notice shows.
+  const poolModeIsSponsor = poolMode === "sponsor";
+  const modeQty = poolModeIsSponsor ? sponsorQty : poolQty;
+  const modeCost = poolModeIsSponsor ? sponsorCost : poolCost;
+  const modeMax = poolModeIsSponsor ? sponsorMaxThisSponsor : poolMaxThisJoin;
+  const modeAtCap = poolModeIsSponsor ? sponsorAtCap : poolAtCap;
+  const modePhase = poolModeIsSponsor ? sponsorPhase : joinPhase;
+  const modeError = poolModeIsSponsor ? sponsorError : joinError;
+  const setModeQuantity = poolModeIsSponsor ? setSponsorQuantity : setPoolQuantity;
+  const modeBusy = modePhase === "approving" || modePhase === "buying";
+
   // ── Pool hero, derived at render (no state, nothing to keep in sync) ──
   // Share is floored to one decimal so it can never round 0.4% up to a whole
   // percent the contributor does not have; the contract's fullMulDiv floor is
@@ -1114,6 +1136,18 @@ export default function Home() {
       ? `@${billedSponsor.username}`
       : `${billedSponsor.address.slice(0, 6)}…${billedSponsor.address.slice(-4)}`
     : "a sponsor";
+  // How the hero pill credits the sponsors. The headcount used to live on its own
+  // line in the sponsor panel ("… by N sponsors"); folding it in here keeps that
+  // fact without spending a second element on it. When nobody cleared the billing
+  // floor there is no name to lead with, so a bare count reads better than
+  // "a sponsor and 2 others". sponsorCount can legitimately exceed the number of
+  // NAMED sponsors, so it is always the authority on "how many".
+  const sponsorCredit =
+    !billedSponsor && sponsorCount > BigInt(1)
+      ? `${sponsorCount.toString()} sponsors`
+      : sponsorCount > BigInt(1)
+        ? `${sponsorHeroName} & ${(sponsorCount - BigInt(1)).toString()} other${sponsorCount === BigInt(2) ? "" : "s"}`
+        : sponsorHeroName;
   const poolNeedsApproval = poolAllowance === undefined || poolAllowance < poolCost;
   // Same USDC allowance as join — both spend from the wallet's approval to FARPOT_POOL_ADDRESS,
   // only the quantity (and so the cost) differs. `undefined` means NEEDS approval, never "no
@@ -3270,32 +3304,59 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Copy rule: variance reduction and social play, never better odds. */}
-            <p className="text-mut text-xs text-center">
-              Everyone&rsquo;s tickets ride together — the pot splits by how many you put in.
-            </p>
-
             {/* Sponsored hero line — shown whenever this draw has ANY sponsored tickets,
                 independent of whether one cleared the billing floor (see billedSponsor
                 above). This is the one place on the tab where the "no better odds" copy
                 rule does NOT apply: a sponsored draw is genuinely +EV for joiners, because
                 sponsored tickets ride in the pot but pay out only to joiners. Both lines
-                share the same gate so they always appear together. */}
+                share the same gate so they always appear together.
+
+                The count now rides in a pill matching the players pill above rather than
+                as loose centred text, and the pill dropped its trailing "free odds for
+                everyone in" — the green line below already says that, at more length and
+                more precisely. The +EV sentence itself is unchanged.
+
+                The tab's general "everyone's tickets ride together" line used to sit here;
+                it moved into the panel below as the Join mode's explainer, where it sits
+                directly above the action it describes. */}
             {sponsoredTickets > BigInt(0) && (
-              <div className="mt-3 space-y-1 text-center">
-                <p className="pool-dimmer text-[11px]">
-                  {`${sponsoredTickets.toString()} sponsored ticket${sponsoredTickets === BigInt(1) ? "" : "s"} from ${sponsorHeroName} — free odds for everyone in`}
-                </p>
-                <p className="text-wins-green text-[11px] font-semibold">
+              <div className="mt-3 flex flex-col items-center gap-1.5">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-gold/40 bg-gold/15 px-3 py-1.5 text-[11px] font-semibold text-gold">
+                  <span aria-hidden="true">🎁</span>
+                  {`${sponsoredTickets.toString()} sponsored ticket${sponsoredTickets === BigInt(1) ? "" : "s"} from ${sponsorCredit}`}
+                </span>
+                <p className="text-wins-green text-[11px] font-semibold text-center">
                   {`Sponsored tickets pay out to joiners, so joining a sponsored pool is better than buying alone.`}
                 </p>
               </div>
             )}
           </div>
 
-          {/* Join — the same surface as the Play tab's ticket panel, so the
-              action reads as a real card and not an untreated box. */}
+          {/* Add to this pool — ONE panel behind a segmented Join/Sponsor control,
+              replacing the two near-identical stepper cards that used to stack here.
+              Both modes are the same act (put USDC into this draw's pot) differing
+              only in who the winnings pay out to, so they share the stepper, the cap
+              line, the button and the status block; only the labels, the bound
+              quantity and the handler differ. `handleJoin`/`handleSponsor` are
+              untouched — this is presentation, not transaction logic.
+
+              Sponsored tickets ride in the pot but carry no joiner weight of their
+              own; a sponsor who also joins still collects a joiner share of the WHOLE
+              pot, including their own sponsored tickets' winnings (see FarpotPool's
+              test_sponsorWhoAlsoJoins_collectsAJoinerShare). The copy below must never
+              say a sponsor "gets nothing" — it is false.
+
+              This panel reads only the aggregate ticket counts from sponsorsOf, never
+              sponsorShareOf's `owed`: while a sponsored drawing is still Accumulating
+              with no joiners, `owed` reports the sponsor as owed the ENTIRE pot — a
+              number that drops to zero the instant anyone joins. Same rule as
+              myPastPools/poolRowState below; there is nothing here to gate because no
+              payout figure is read at all. */}
           <div className="play-ticket-panel">
+            {/* Paused and jackpotLock close BOTH modes identically, so the segmented
+                control is hidden rather than offering a switch that changes nothing.
+                The per-mode soft caps are handled further down, INSIDE the control,
+                because those two budgets are independent on-chain. */}
             {poolPaused ? (
               <p className="pool-dim text-sm">
                 Joining is paused right now. Pools that already bought their tickets are
@@ -3306,208 +3367,143 @@ export default function Home() {
                 The draw is about to happen, so joining is closed for a few minutes. It reopens
                 for the next drawing.
               </p>
-            ) : poolAtCap ? (
-              <p className="pool-dim text-sm">
-                This draw&rsquo;s pool is full for now — we&rsquo;re keeping pools to a soft cap
-                of ${(Number(POOL_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw while the contract
-                is still being audited. It reopens with the next drawing.
-              </p>
             ) : (
               <>
-                <div className="flex items-center justify-between">
-                  <span className="text-white font-heading font-bold text-sm">Tickets to add</span>
-                  <div className="flex items-center gap-3">
+                <div
+                  className="segmented-control"
+                  role="radiogroup"
+                  aria-label="How to add to this pool"
+                >
+                  {([
+                    ["join", "Join"],
+                    ["sponsor", "Sponsor"],
+                  ] as const).map(([mode, label]) => (
                     <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={poolMode === mode}
                       onClick={() => {
                         haptics.select();
-                        setPoolQuantity(Math.max(1, poolQty - 1));
+                        setPoolMode(mode);
                       }}
-                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                      className={poolMode === mode ? "is-active" : ""}
                     >
-                      −
+                      {label}
                     </button>
-                    <span className="text-white font-heading font-extrabold w-8 text-center">
-                      {poolQty}
-                    </span>
-                    <button
-                      onClick={() => {
-                        haptics.select();
-                        setPoolQuantity(Math.min(poolMaxThisJoin, poolQty + 1));
-                      }}
-                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
-                    >
-                      +
-                    </button>
-                  </div>
+                  ))}
                 </div>
-                <p className="pool-dimmer text-[11px] mt-2">
-                  Up to {poolMaxThisJoin} per join — join as often as you like.
+
+                {/* One explainer, directly above the action it describes. The Join
+                    string is the tab's old hero line, moved down from the jackpot card.
+                    Copy rule: variance reduction and social play, never better odds —
+                    the sponsored hero block above is the one sanctioned exception. */}
+                <p className="pool-dim text-xs mt-3">
+                  {poolModeIsSponsor
+                    ? "Your tickets go into the pot, but their winnings pay out to everyone else who joins. Sponsoring is how you improve the odds for the whole group."
+                    : "Everyone's tickets ride together — the pot splits by how many you put in."}
                 </p>
 
-                {isConnected ? (
-                  <button
-                    onClick={handleJoin}
-                    disabled={joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)}
-                    className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
-                      joinPhase === "approving" || joinPhase === "buying" || poolCost === BigInt(0)
-                        ? "bg-white/5 text-mut cursor-not-allowed"
-                        : "btn-gold"
-                    } ${joinPhase === "approving" || joinPhase === "buying" ? "animate-pulse" : ""}`}
-                  >
-                    {joinPhase === "approving"
-                      ? "Approving USDC…"
-                      : joinPhase === "buying"
-                        ? "Joining…"
-                        : `Join with ${poolQty} ticket${poolQty === 1 ? "" : "s"} · $${formatUnits(poolCost, USDC_DECIMALS)}`}
-                  </button>
-                ) : (
-                  <div className="mt-4">
-                    <ConnectWallet />
-                  </div>
-                )}
-
-                {joinPhase === "success" && (
-                  <div className="mt-3">
-                    <p className="text-wins-green text-sm font-heading font-bold">You&rsquo;re in 🎰</p>
-                    <button
-                      onClick={handleSharePool}
-                      className="mt-2 text-gold text-xs font-heading font-bold underline"
-                    >
-                      Share on Farcaster
-                    </button>
-                  </div>
-                )}
-                {joinError && <p className="text-coral text-sm mt-3">{joinError}</p>}
-              </>
-            )}
-          </div>
-
-          {/* Sponsor — a secondary CTA below Join, same surface treatment. Sponsored
-              tickets ride in the pot but carry no joiner weight of their own; a sponsor
-              who also joins still collects a joiner share of the WHOLE pot, including
-              their own sponsored tickets' winnings (see FarpotPool's
-              test_sponsorWhoAlsoJoins_collectsAJoinerShare). The copy below must never
-              say a sponsor "gets nothing" — it is false.
-
-              This panel reads only the aggregate ticket counts from sponsorsOf, never
-              sponsorShareOf's `owed`: while a sponsored drawing is still Accumulating
-              with no joiners, `owed` reports the sponsor as owed the ENTIRE pot — a
-              number that drops to zero the instant anyone joins. Same rule as
-              myPastPools/poolRowState below (no payout figure before Settled); there is
-              simply nothing here to gate because no payout figure is read at all. */}
-          <div className="play-ticket-panel">
-            <h3 className="text-white font-heading font-extrabold text-sm">Sponsor this pool</h3>
-            <p className="pool-dim text-xs mt-2">
-              Your tickets go into the pot, but their winnings pay out to everyone else who joins.
-              Sponsoring is how you improve the odds for the whole group.
-            </p>
-
-            {sponsoredTickets > BigInt(0) && (
-              // Kept as ONE template literal, not split JSX text/expression children — a
-              // newline between a text node and an adjacent {expr} is trimmed away entirely
-              // by the JSX transform (see the odds-line gotcha in AGENTS.md), which would
-              // glue "far" directly onto "by".
-              <p className="pool-dimmer text-[11px] mt-2">
-                {`${sponsoredTickets.toString()} ticket${
-                  sponsoredTickets === BigInt(1) ? "" : "s"
-                } sponsored so far${
-                  sponsorCount > BigInt(0)
-                    ? ` by ${sponsorCount.toString()} sponsor${sponsorCount === BigInt(1) ? "" : "s"}.`
-                    : "."
-                }`}
-              </p>
-            )}
-
-            {poolPaused ? (
-              <p className="pool-dim text-sm mt-3">
-                Sponsoring is paused right now. Existing pools are unaffected.
-              </p>
-            ) : drawingState?.jackpotLock ? (
-              <p className="pool-dim text-sm mt-3">
-                The draw is about to happen, so sponsoring is closed for a few minutes. It
-                reopens for the next drawing.
-              </p>
-            ) : sponsorAtCap ? (
-              <p className="pool-dim text-sm mt-3">
-                Sponsorship for this draw is full for now — we&rsquo;re keeping sponsorships to a
-                soft cap of ${(Number(POOL_SPONSOR_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw
-                while the contract is still being audited. It reopens with the next drawing.
-              </p>
-            ) : (
-              <>
-                <div className="flex items-center justify-between mt-4">
-                  <span className="text-white font-heading font-bold text-sm">
-                    Tickets to sponsor
-                  </span>
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => {
-                        haptics.select();
-                        setSponsorQuantity(Math.max(1, sponsorQty - 1));
-                      }}
-                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
-                    >
-                      −
-                    </button>
-                    <span className="text-white font-heading font-extrabold w-8 text-center">
-                      {sponsorQty}
-                    </span>
-                    <button
-                      onClick={() => {
-                        haptics.select();
-                        setSponsorQuantity(Math.min(sponsorMaxThisSponsor, sponsorQty + 1));
-                      }}
-                      className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-                <p className="pool-dimmer text-[11px] mt-2">
-                  Up to {sponsorMaxThisSponsor} per sponsorship — sponsor as often as you like.
-                </p>
-
-                {isConnected ? (
-                  <button
-                    onClick={handleSponsor}
-                    disabled={
-                      sponsorPhase === "approving" ||
-                      sponsorPhase === "buying" ||
-                      sponsorCost === BigInt(0) ||
-                      // Block while the allowance loads for the pool contract — treating
-                      // an unknown allowance as "no approval needed" is the exact race
-                      // documented in AGENTS.md.
-                      poolAllowance === undefined
-                    }
-                    className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
-                      sponsorPhase === "approving" ||
-                      sponsorPhase === "buying" ||
-                      sponsorCost === BigInt(0) ||
-                      poolAllowance === undefined
-                        ? "bg-white/5 text-mut cursor-not-allowed"
-                        : "btn-gold"
-                    } ${sponsorPhase === "approving" || sponsorPhase === "buying" ? "animate-pulse" : ""}`}
-                  >
-                    {sponsorPhase === "approving"
-                      ? "Approving USDC…"
-                      : sponsorPhase === "buying"
-                        ? "Sponsoring…"
-                        : poolAllowance === undefined
-                          ? "Checking approval…"
-                          : `Sponsor ${sponsorQty} Ticket${sponsorQty === 1 ? "" : "s"} · $${formatUnits(sponsorCost, USDC_DECIMALS)}`}
-                  </button>
-                ) : (
-                  <div className="mt-4">
-                    <ConnectWallet />
-                  </div>
-                )}
-
-                {sponsorPhase === "success" && (
-                  <p className="text-wins-green text-sm font-heading font-bold mt-3">
-                    Sponsored 🎁
+                {modeAtCap ? (
+                  <p className="pool-dim text-sm mt-3">
+                    {poolModeIsSponsor
+                      ? `Sponsorship for this draw is full for now — we're keeping sponsorships to a soft cap of $${(Number(POOL_SPONSOR_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw while the contract is still being audited. It reopens with the next drawing.`
+                      : `This draw's pool is full for now — we're keeping pools to a soft cap of $${(Number(POOL_SOFT_CAP_USDC) / 1e6).toFixed(0)} per draw while the contract is still being audited. It reopens with the next drawing.`}
                   </p>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between mt-4">
+                      <span className="text-white font-heading font-bold text-sm">
+                        {poolModeIsSponsor ? "Tickets to sponsor" : "Tickets to add"}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => {
+                            haptics.select();
+                            setModeQuantity(Math.max(1, modeQty - 1));
+                          }}
+                          className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                        >
+                          −
+                        </button>
+                        <span className="text-white font-heading font-extrabold w-8 text-center">
+                          {modeQty}
+                        </span>
+                        <button
+                          onClick={() => {
+                            haptics.select();
+                            setModeQuantity(Math.min(modeMax, modeQty + 1));
+                          }}
+                          className="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center hover:bg-white/20"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                    <p className="pool-dimmer text-[11px] mt-2">
+                      {poolModeIsSponsor
+                        ? `Up to ${modeMax} per sponsorship — sponsor as often as you like.`
+                        : `Up to ${modeMax} per join — join as often as you like.`}
+                    </p>
+
+                    {isConnected ? (
+                      <button
+                        onClick={poolModeIsSponsor ? handleSponsor : handleJoin}
+                        disabled={
+                          modeBusy ||
+                          modeCost === BigInt(0) ||
+                          // Block while the allowance loads for the pool contract —
+                          // treating an unknown allowance as "no approval needed" is the
+                          // exact race documented in AGENTS.md. One button means one gate,
+                          // so the Join side now carries it too (it previously only
+                          // handled the unknown case inside handleJoin).
+                          poolAllowance === undefined
+                        }
+                        className={`w-full mt-4 py-4 rounded-xl font-heading font-extrabold text-lg tracking-wide uppercase transition-all ${
+                          modeBusy || modeCost === BigInt(0) || poolAllowance === undefined
+                            ? "bg-white/5 text-mut cursor-not-allowed"
+                            : "btn-gold"
+                        } ${modeBusy ? "animate-pulse" : ""}`}
+                      >
+                        {modePhase === "approving"
+                          ? "Approving USDC…"
+                          : modePhase === "buying"
+                            ? poolModeIsSponsor
+                              ? "Sponsoring…"
+                              : "Joining…"
+                            : poolAllowance === undefined
+                              ? "Checking approval…"
+                              : poolModeIsSponsor
+                                ? `Sponsor ${modeQty} ticket${modeQty === 1 ? "" : "s"} · $${formatUnits(modeCost, USDC_DECIMALS)}`
+                                : `Join with ${modeQty} ticket${modeQty === 1 ? "" : "s"} · $${formatUnits(modeCost, USDC_DECIMALS)}`}
+                      </button>
+                    ) : (
+                      <div className="mt-4">
+                        <ConnectWallet />
+                      </div>
+                    )}
+
+                    {modePhase === "success" &&
+                      (poolModeIsSponsor ? (
+                        <p className="text-wins-green text-sm font-heading font-bold mt-3">
+                          Sponsored 🎁
+                        </p>
+                      ) : (
+                        <div className="mt-3">
+                          <p className="text-wins-green text-sm font-heading font-bold">
+                            You&rsquo;re in 🎰
+                          </p>
+                          <button
+                            onClick={handleSharePool}
+                            className="mt-2 text-gold text-xs font-heading font-bold underline"
+                          >
+                            Share on Farcaster
+                          </button>
+                        </div>
+                      ))}
+                    {modeError && <p className="text-coral text-sm mt-3">{modeError}</p>}
+                  </>
                 )}
-                {sponsorError && <p className="text-coral text-sm mt-3">{sponsorError}</p>}
               </>
             )}
           </div>
