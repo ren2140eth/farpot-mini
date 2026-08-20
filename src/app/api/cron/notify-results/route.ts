@@ -28,15 +28,26 @@
 // We send them sequentially; if the function times out mid-batch the marker is
 // NOT advanced so the remaining rounds fire on the next tick.
 import { NextResponse } from "next/server";
-import { createPublicClient, http, fallback } from "viem";
+import { createPublicClient, http, fallback, formatUnits } from "viem";
 import { base } from "viem/chains";
 import { JACKPOT_ADDRESS, JACKPOT_ABI } from "@/lib/constants";
 import {
-  allTokens,
+  allTokenEntries,
   sendNotifications,
   getDrawMarker,
   setDrawMarker,
+  claimNudgeSlot,
+  getNudgeStep,
+  advanceNudgeStep,
+  resetNudgeState,
+  type SubscriberToken,
 } from "@/lib/notifications";
+import {
+  fetchRoundPlayers,
+  loadAddressesForFids,
+  classify,
+  nudgeDecision,
+} from "@/lib/notify-segments";
 import { runCrank, runStalenessMonitor } from "@/lib/pool-ops";
 
 export const runtime = "nodejs";
@@ -71,6 +82,17 @@ export async function GET(req: Request) {
     console.warn("[cron:notify] auth failed — missing or wrong CRON_SECRET");
     return new NextResponse("Unauthorized", { status: 401 });
   }
+
+  // Dry run: classify and log exactly what WOULD be sent, without sending, advancing the
+  // draw marker, or claiming throttle slots. Still behind CRON_SECRET. This is the only way
+  // to verify segmentation against real data — the Upstash credentials are marked sensitive
+  // in Vercel, so the token store cannot be exercised from a local machine.
+  //
+  // SCOPE: this flag covers the NOTIFICATION half only. Pool cranking and the staleness
+  // monitor above have already run by this point and are not suppressed — they are idempotent
+  // and are the money path, so a dry run must not be a reason to skip them.
+  const dryRun = new URL(req.url).searchParams.get("dryRun") === "1";
+  if (dryRun) console.log("[cron:notify] DRY RUN — no sends, no marker advance, no throttle claims");
 
   // RPC read — wrapped so a transient failure doesn't silently kill the run.
   let currentId: bigint;
@@ -145,7 +167,7 @@ export async function GET(req: Request) {
 
   // First ever run: record where we are, don't blast a notice for an old round.
   if (marker === null) {
-    await setDrawMarker(currentId);
+    if (!dryRun) await setDrawMarker(currentId);
     console.log("[cron:notify] first run — initialised marker to", currentId.toString());
     return respond({ ok: true, init: true, currentId: currentId.toString() });
   }
@@ -165,38 +187,180 @@ export async function GET(req: Request) {
   }
   console.log("[cron:notify] coalescing", roundsToNotify.length, "round(s):", roundsToNotify.map(String).join(", "));
 
-  const tokens = await allTokens();
-  console.log("[cron:notify] loaded", tokens.length, "notification token(s)");
+  // Headline jackpot for the non-player message — the SAME read the app's headline uses
+  // (`getDrawingTierPayouts(currentDrawingId)[11]`), so the notification and the UI cannot
+  // quote different numbers. Failure is non-fatal and deliberately does not block results:
+  // we skip the nudge rather than state a figure we did not actually read.
+  let jackpotLabel: string | null = null;
+  try {
+    const tiers = (await publicClient.readContract({
+      address: JACKPOT_ADDRESS,
+      abi: JACKPOT_ABI,
+      functionName: "getDrawingTierPayouts",
+      args: [currentId],
+    })) as readonly bigint[];
+    const usd = Number(formatUnits(tiers[11], 6));
+    jackpotLabel =
+      usd >= 1_000_000 ? `$${(usd / 1_000_000).toFixed(1)}M` : `$${(usd / 1_000).toFixed(0)}K`;
+  } catch (err) {
+    console.error("[cron:notify] tier payouts unreadable — skipping jackpot nudge:", err);
+  }
 
-  if (tokens.length === 0) {
+  const subscribers = await allTokenEntries();
+  console.log("[cron:notify] loaded", subscribers.length, "notification token(s)");
+
+  if (subscribers.length === 0) {
     // Nobody to notify — still advance the marker so we don't re-notify next tick.
-    await setDrawMarker(currentId);
+    if (!dryRun) await setDrawMarker(currentId);
     console.log("[cron:notify] no tokens — marker advanced to", currentId.toString(), "(skipped", roundsToNotify.length, "round notification(s))");
     return respond({ ok: true, roundsSkipped: roundsToNotify.map(String), recipients: 0, result: [] });
   }
 
-  // Send one notification per missed round. If the function times out mid-batch
-  // the marker is NOT advanced so the remaining rounds fire on the next tick.
-  const allResults: Array<{ round: string; result: unknown }> = [];
+  // fid → verified addresses, cache-first. One Neynar call per 100 uncached subscribers.
+  const addressesByFid = await loadAddressesForFids(subscribers.map((s) => s.fid));
+
+  // ── Pass 1: results, to the people who actually played ──────────────────────────────
+  //
+  // This is the fix for the original defect: the results copy says "tap to see if you won",
+  // which is false for anyone who never bought a ticket, and it used to go to every token
+  // every single day.
+  const notifiedFids = new Set<number>();
+  const unknownFids = new Set<number>();
+  const allResults: Array<{ round: string; recipients: number; result: unknown }> = [];
+
   for (const round of roundsToNotify) {
-    console.log("[cron:notify] sending notification for round", round.toString());
+    const roster = await fetchRoundPlayers(round);
+    if (roster === null) {
+      // A partial or missing roster would misfile real players as non-players, so bail rather
+      // than classify against it. The marker moves up to THIS round — not past it — so the
+      // rounds already notified above are not re-sent on the next tick while the failed one
+      // still is. (Farcaster dedupes a repeated notificationId for 24h, but the next tick is
+      // ~24h away, which is exactly the boundary that dedupe stops covering.)
+      console.error("[cron:notify] roster unavailable for round", round.toString(), "— parking marker here");
+      if (!dryRun) await setDrawMarker(round);
+      return respond(
+        { ok: false, error: "roster_unavailable", round: round.toString(), rounds: roundsToNotify.map(String) },
+        503,
+      );
+    }
+
+    const players: SubscriberToken[] = [];
+    for (const sub of subscribers) {
+      const segment = classify(addressesByFid.get(sub.fid) ?? null, roster);
+      if (segment === "unknown") {
+        unknownFids.add(sub.fid);
+        continue;
+      }
+      if (segment === "player") players.push(sub);
+    }
+
+    console.log(
+      "[cron:notify] round", round.toString(),
+      "roster", roster.size,
+      "players", players.length,
+      "unknown", unknownFids.size,
+    );
+
+    if (players.length === 0) {
+      allResults.push({ round: round.toString(), recipients: 0, result: [] });
+      continue;
+    }
+
+    for (const p of players) notifiedFids.add(p.fid);
+    if (dryRun) {
+      allResults.push({ round: round.toString(), recipients: players.length, result: "dry-run" });
+      continue;
+    }
+
+    // Playing graduates someone back to the results path and rewinds the nudge ladder, so a
+    // lapse after real engagement starts again at the shortest rung.
+    for (const p of players) await resetNudgeState(p.fid);
+
     const result = await sendNotifications({
       notificationId: `draw-${round}`,
       title: "🎰 The draw is in!",
       body: `Round #${round} results are live — tap to see if you won.`,
-      targetUrl: `${APP_URL}/?tab=results`,
-      tokens,
+      targetUrl: `${APP_URL}/?tab=results&n=results`,
+      tokens: players,
     });
-    allResults.push({ round: round.toString(), result });
+    allResults.push({ round: round.toString(), recipients: players.length, result });
   }
 
-  await setDrawMarker(currentId);
-  console.log("[cron:notify] marker advanced to", currentId.toString());
+  // ── Pass 2: jackpot status, to everyone who did NOT just get results ────────────────
+  //
+  // Ordering is the whole mechanism for "nobody gets two notifications in a day": the
+  // recipient list is built by exclusion, here, rather than by trusting the platform to
+  // suppress the second send. It would not — the documented limits are 1 per 30s and 100
+  // per day per token, so both messages WOULD be delivered.
+  const nudgeCandidates = subscribers.filter(
+    (s) => !notifiedFids.has(s.fid) && !unknownFids.has(s.fid),
+  );
+
+  const nudgeSkips = { throttled: 0, laddered: 0 };
+  const nudgeTargets: SubscriberToken[] = [];
+  for (const sub of nudgeCandidates) {
+    const decision = nudgeDecision(await getNudgeStep(sub.fid));
+    if (!decision.send) {
+      // Ladder exhausted — this person has heard from us three times without playing.
+      nudgeSkips.laddered++;
+      continue;
+    }
+    if (dryRun) {
+      nudgeTargets.push(sub);
+      continue;
+    }
+    // The claim IS the throttle: SET NX EX, so the key's TTL is the window and two
+    // overlapping runs cannot both nudge the same person.
+    if (!(await claimNudgeSlot(sub.fid, decision.ttlSeconds))) {
+      nudgeSkips.throttled++;
+      continue;
+    }
+    nudgeTargets.push(sub);
+  }
+
+  let nudgeResult: unknown = [];
+  if (nudgeTargets.length > 0 && jackpotLabel) {
+    if (dryRun) {
+      nudgeResult = "dry-run";
+    } else {
+      for (const t of nudgeTargets) await advanceNudgeStep(t.fid);
+      nudgeResult = await sendNotifications({
+        notificationId: `jackpot-${currentId}`,
+        title: "🎰 Today's Farpot jackpot",
+        body: `Round #${currentId} is open — the jackpot is ${jackpotLabel}. Tap to play.`,
+        targetUrl: `${APP_URL}/?n=jackpot`,
+        tokens: nudgeTargets,
+      });
+    }
+  }
+
+  console.log(
+    "[cron:notify] jackpot nudge —",
+    "candidates", nudgeCandidates.length,
+    "sent", jackpotLabel ? nudgeTargets.length : 0,
+    "throttled", nudgeSkips.throttled,
+    "ladder-exhausted", nudgeSkips.laddered,
+    "jackpot", jackpotLabel ?? "unavailable",
+  );
+
+  if (!dryRun) {
+    await setDrawMarker(currentId);
+    console.log("[cron:notify] marker advanced to", currentId.toString());
+  }
 
   return respond({
     ok: true,
+    dryRun,
     rounds: roundsToNotify.map(String),
-    recipients: tokens.length,
+    subscribers: subscribers.length,
     results: allResults,
+    nudge: {
+      jackpot: jackpotLabel,
+      candidates: nudgeCandidates.length,
+      sent: jackpotLabel ? nudgeTargets.length : 0,
+      ...nudgeSkips,
+      unknown: unknownFids.size,
+      result: nudgeResult,
+    },
   });
 }

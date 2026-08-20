@@ -71,20 +71,35 @@ export async function removeToken(fid: number) {
   await redis(["SREM", FID_INDEX, String(fid)]);
 }
 
-export async function allTokens(): Promise<NotificationToken[]> {
+export interface SubscriberToken extends NotificationToken {
+  fid: number;
+}
+
+// Returns the fid alongside each token. The fid is the ONLY identifier the webhook ever
+// stores, so it is also the only handle segmentation has: `notify-segments` resolves it to
+// an address to decide whether this subscriber played the round. Without the fid here, the
+// cron can do nothing but blast every token the same message — which is exactly the bug
+// this replaced (non-players were told daily to "see if you won").
+//
+// Index alignment is load-bearing: Redis MGET returns values in the same order as the keys
+// it was given, so `raw[i]` belongs to `fids[i]`. A missing key comes back as null and is
+// skipped, which keeps the pairing intact rather than shifting every later fid by one.
+export async function allTokenEntries(): Promise<SubscriberToken[]> {
   const fids = (await redis<string[]>(["SMEMBERS", FID_INDEX])) ?? [];
   if (fids.length === 0) return [];
   const keys = fids.map((f) => tokenKey(f));
   const raw = (await redis<(string | null)[]>(["MGET", ...keys])) ?? [];
-  const out: NotificationToken[] = [];
-  for (const r of raw) {
-    if (!r) continue;
+  const out: SubscriberToken[] = [];
+  raw.forEach((entry, i) => {
+    if (!entry) return;
+    const fid = Number(fids[i]);
+    if (!Number.isFinite(fid)) return;
     try {
-      out.push(JSON.parse(r) as NotificationToken);
+      out.push({ fid, ...(JSON.parse(entry) as NotificationToken) });
     } catch {
       /* skip malformed */
     }
-  }
+  });
   return out;
 }
 
@@ -170,4 +185,77 @@ export async function sendNotifications(opts: {
     }
   }
   return results;
+}
+
+// ── Segmentation + nudge state ───────────────────────────────────────
+// Storage for the two-message split. The decision logic lives in `notify-segments.ts`;
+// this file stays the single place that talks to Redis about notifications.
+const addrKey = (fid: number) => `mm:notif:addr:${fid}`;
+const nudgeSlotKey = (fid: number) => `mm:notif:nudge:${fid}`;
+const nudgeStepKey = (fid: number) => `mm:notif:nudgestep:${fid}`;
+const DISABLE_COUNTER = "mm:notif:disables";
+
+// fid → verified addresses, cached for a day. Verified addresses change rarely, and this
+// turns an N-subscriber cron into roughly one Neynar call per day rather than one per tick.
+const ADDR_CACHE_SECONDS = 86_400;
+
+// `null` means "not cached" — distinct from a cached EMPTY array, which is the real and
+// meaningful answer "Neynar says this fid has no verified address". Collapsing those two
+// would re-query Neynar every tick for exactly the accounts that will never resolve.
+export async function getCachedAddresses(fid: number): Promise<string[] | null> {
+  const raw = await redis<string | null>(["GET", addrKey(fid)]);
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setCachedAddresses(fid: number, addresses: string[]) {
+  await redis(["SET", addrKey(fid), JSON.stringify(addresses), "EX", ADDR_CACHE_SECONDS]);
+}
+
+// Atomically claim this fid's nudge slot for `ttlSeconds`. SET NX is what makes the throttle
+// correct rather than merely likely: the key's own TTL *is* the throttle window, so there is
+// no cleanup job, and two overlapping cron runs cannot both decide to nudge the same person.
+// Returns false when a slot is already held (still inside the window) — meaning "stay quiet".
+export async function claimNudgeSlot(fid: number, ttlSeconds: number): Promise<boolean> {
+  const res = await redis<string | null>([
+    "SET", nudgeSlotKey(fid), "1", "NX", "EX", ttlSeconds,
+  ]);
+  return res === "OK";
+}
+
+// How many nudges this fid has already been sent — the index into the decay ladder.
+export async function getNudgeStep(fid: number): Promise<number> {
+  const raw = await redis<string | number | null>(["GET", nudgeStepKey(fid)]);
+  const n = Number(raw ?? 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+export async function advanceNudgeStep(fid: number) {
+  await redis(["INCR", nudgeStepKey(fid)]);
+}
+
+// Called when someone plays. Clearing BOTH keys is the point: they graduate back to the
+// results path, and if they later go quiet the ladder starts again at its shortest rung
+// instead of resuming at "we already gave up on this person".
+export async function resetNudgeState(fid: number) {
+  await redis(["DEL", nudgeStepKey(fid)]);
+  await redis(["DEL", nudgeSlotKey(fid)]);
+}
+
+// Churn counter. The platform documents send ceilings but no guidance on how often you
+// SHOULD send, so this is the only evidence we will ever have that the cadence is too
+// aggressive. Incremented when a user turns notifications off or removes the app.
+export async function recordNotificationsDisabled() {
+  await redis(["INCR", DISABLE_COUNTER]);
+}
+
+export async function getDisableCount(): Promise<number> {
+  const raw = await redis<string | number | null>(["GET", DISABLE_COUNTER]);
+  const n = Number(raw ?? 0);
+  return Number.isFinite(n) ? n : 0;
 }
