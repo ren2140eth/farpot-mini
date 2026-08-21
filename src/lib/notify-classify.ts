@@ -6,11 +6,21 @@
 
 export type SubscriberSegment = "player" | "non-player" | "unknown";
 
-// Decay ladder: nudge after 3 idle days, then 7, then 14, then stop until they play again.
-// Three nudges over ~24 days, after which someone who has never engaged goes quiet for good
-// rather than being pestered indefinitely. Playing clears the state, so anyone who engages
-// starts over at the shortest rung.
-export const NUDGE_LADDER_SECONDS = [3, 7, 14].map((days) => days * 86_400);
+// Decay ladder. These are the waits BETWEEN consecutive nudges, not before the first one:
+// the first nudge fires on the first tick a subscriber is eligible, so the total a subscriber
+// can ever receive is one MORE than the number of waits here.
+//
+// Naming matters because the earlier `NUDGE_LADDER_SECONDS` read as "one rung per nudge",
+// which it never was — the final rung's wait is claimed as a throttle TTL but there is
+// nothing after it to gate, so with three rungs and a stop-at-three the last one was dead.
+//
+// As tuned: nudges at day 0, +3, +10, +24, then silence until they play again. Four nudges
+// over 24 days. Playing clears the state, so anyone who engages starts over at the shortest
+// wait rather than resuming at "we already gave up on this person".
+export const NUDGE_WAITS_SECONDS = [3, 7, 14].map((days) => days * 86_400);
+
+/** One more than the number of waits — the first nudge is not preceded by one. */
+export const MAX_NUDGES = NUDGE_WAITS_SECONDS.length + 1;
 
 // NOTE — do NOT add a "only nudge when the jackpot moved" gate. It sounds right and was in the
 // original design, but the jackpot is LP-funded and near-flat: measured on-chain across
@@ -47,8 +57,12 @@ export type NudgeDecision =
 /** Given how many nudges this fid has already had, decide whether to send another. */
 export function nudgeDecision(step: number): NudgeDecision {
   if (!Number.isFinite(step) || step < 0) step = 0;
-  if (step >= NUDGE_LADDER_SECONDS.length) return { send: false, reason: "ladder-exhausted" };
-  return { send: true, ttlSeconds: NUDGE_LADDER_SECONDS[step] };
+  if (step >= MAX_NUDGES) return { send: false, reason: "ladder-exhausted" };
+  // The throttle claimed after THIS send is the wait before the next one. The final nudge has
+  // no next one, so its value is immaterial — reuse the last wait rather than read past the
+  // end of the array, which would put `undefined` into a Redis EX and fail the claim.
+  const ttlSeconds = NUDGE_WAITS_SECONDS[Math.min(step, NUDGE_WAITS_SECONDS.length - 1)];
+  return { send: true, ttlSeconds };
 }
 
 // ── Round roster: URL + parsing ──────────────────────────────────────
