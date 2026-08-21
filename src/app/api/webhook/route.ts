@@ -9,7 +9,7 @@
 // Spec: https://miniapps.farcaster.xyz/docs/guides/notifications
 import { NextResponse } from "next/server";
 import { parseWebhookEvent, verifyAppKeyWithNeynar } from "@farcaster/miniapp-node";
-import { saveToken, removeToken } from "@/lib/notifications";
+import { saveToken, removeToken, recordNotificationsDisabled } from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,6 +48,11 @@ export async function POST(req: Request) {
     case "miniapp_removed":
     case "notifications_disabled":
       await removeToken(fid);
+      // Count the opt-out. Farcaster documents send CEILINGS (1/30s, 100/day per token) but
+      // gives no guidance on how often you should actually send, so this counter is the only
+      // evidence we will ever have that the cadence is too aggressive. Without it, tuning the
+      // nudge ladder would be guesswork.
+      await recordNotificationsDisabled();
       break;
   }
 
