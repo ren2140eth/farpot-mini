@@ -26,7 +26,7 @@ import { getCachedAddresses, setCachedAddresses } from "./notifications";
 
 import { roundPlayersUrl, parsePlayersPage, type PlayersPage } from "./notify-classify";
 
-export { classify, nudgeDecision, NUDGE_LADDER_SECONDS } from "./notify-classify";
+export { classify, nudgeDecision, NUDGE_WAITS_SECONDS, MAX_NUDGES } from "./notify-classify";
 export type { SubscriberSegment, NudgeDecision } from "./notify-classify";
 
 const PLAYERS_PAGE_LIMIT = 100;
