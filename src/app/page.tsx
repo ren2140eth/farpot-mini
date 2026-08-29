@@ -40,7 +40,7 @@ import {
 import { confirmTransaction } from "@/lib/transaction-receipt";
 import { poolJoinLimits, poolSponsorLimits } from "@/lib/pool-cap";
 import { bufferGas } from "@/lib/gas-buffer";
-import { poolHistoryRange, poolRowState } from "@/lib/pool-history";
+import { poolBreakdown, poolHistoryRange, poolRowState } from "@/lib/pool-history";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -203,6 +203,28 @@ interface ApiPaginated<T> {
   has_more: boolean;
 }
 
+/**
+ * `poolOf`'s tuple, in declaration order. Positional by necessity — the ABI declares six flat
+ * outputs, so viem returns an array and a named read would be `undefined` (the exact defect
+ * that once rendered the jackpot card as zeros).
+ */
+type PoolOfResult = readonly [bigint, bigint, bigint, number, bigint, bigint];
+
+/** One past-draw row, for both the joiner and sponsor lists — they render the same shape. */
+interface PastPoolRow {
+  drawingId: bigint;
+  /** This wallet's tickets in whichever class the row represents. */
+  tickets: bigint;
+  owed: bigint;
+  hasClaimed: boolean;
+  state: number;
+  /** Joiner weight for the whole drawing (`poolOf.tickets`). */
+  totalTickets: bigint;
+  /** Every ticket the pool bought (`poolOf.ticketCount`) — joined plus sponsored. */
+  ticketCount: bigint;
+  pot: bigint;
+}
+
 // Shape served by our own /api/winners/recent route.
 interface TickerWinner {
   round_id: string;
@@ -354,6 +376,192 @@ async function fetchApi<T>(path: string): Promise<ApiPaginated<T> | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * How many of the pool's tickets won, per drawing.
+ *
+ * The pool contract OWNS every ticket it buys, so Megapot's wallet endpoint returns the whole
+ * group's history under one address. Burned tickets survive the indexer, so a draw the crank
+ * has already claimed still reports its results.
+ *
+ * A drawing that comes back with tickets but no winners maps to 0. A drawing missing from the
+ * map was never covered by this fetch, and its count must render as "unknown" rather than as
+ * zero — a lookup failure printing "0 winning tickets" above a real pot is a lie, not a blank.
+ *
+ * Returns null if the very first page fails, so callers can tell "no data" from "no winners".
+ */
+async function fetchPoolWinCounts(oldestDrawing: bigint): Promise<Map<string, number> | null> {
+  const counts = new Map<string, number>();
+  let cursor: string | null = null;
+
+  // Bounded so a pool with a long history cannot spin here. Ten pages of 100 covers far more
+  // than the drawing lookback the rows can show.
+  for (let page = 0; page < 10; page++) {
+    // Annotated because `cursor` is reassigned from the response this string builds the URL
+    // for, and TS reads that round trip as a circular initializer without it.
+    const qs: string = `limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const res = await fetchApi<ApiTicket>(`/wallets/${FARPOT_POOL_ADDRESS}/tickets?${qs}`);
+    // Give up rather than return a partial map: a half-filled map is indistinguishable from a
+    // complete one, and the missing rounds would silently render as zero winners.
+    if (!res) return page === 0 ? null : counts;
+
+    let reachedFloor = false;
+    for (const t of res.data) {
+      // Seed at zero on first sight, so "the pool played this draw and won nothing" is a fact
+      // the map carries rather than an absence.
+      counts.set(t.round_id, counts.get(t.round_id) ?? 0);
+      if (Number(t.winnings_amount?.amount ?? 0) > 0) {
+        counts.set(t.round_id, (counts.get(t.round_id) ?? 0) + 1);
+      }
+      if (BigInt(t.round_id) <= oldestDrawing) reachedFloor = true;
+    }
+
+    cursor = res.next_cursor;
+    if (!res.has_more || !cursor || reachedFloor) break;
+  }
+  return counts;
+}
+
+/**
+ * One past-draw row, plus the expandable breakdown of how the draw's money divided.
+ *
+ * Shared by the joiner and sponsor lists. Those two rendered near-identical markup already and
+ * the panel would have been a third copy; the only real differences are the subtitle, the
+ * no-payout wording, and which class `poolBreakdown` divides by.
+ *
+ * The panel exists because the row alone is unauditable: once `hasClaimed` flips, `shareOf.owed`
+ * reads zero and the row collapses to "✓ claimed" with the amount nowhere on screen. It shows
+ * the chain from what the pool bought down to this wallet's cut, so the arithmetic can be
+ * checked against the claim that landed in the wallet.
+ */
+function PastPoolRowCard({
+  row,
+  kind,
+  winningTickets,
+  isOpen,
+  onToggle,
+  onClaim,
+  isClaiming,
+}: {
+  row: PastPoolRow;
+  kind: "joiner" | "sponsor";
+  winningTickets: number | null;
+  isOpen: boolean;
+  onToggle: () => void;
+  onClaim: () => void;
+  isClaiming: boolean;
+}) {
+  const breakdown = poolBreakdown({
+    kind,
+    state: row.state,
+    ticketCount: row.ticketCount,
+    totalTickets: row.totalTickets,
+    pot: row.pot,
+    myTickets: row.tickets,
+    winningTickets,
+  });
+  const status = poolRowState(row);
+  const plural = row.tickets === BigInt(1) ? "" : "s";
+
+  return (
+    <div className="rounded-xl bg-white/5">
+      <div className="p-4 flex items-center justify-between gap-3">
+        {/* Only a settled draw has a breakdown, so an unsettled row stays plain text rather
+            than offering a control that opens an empty panel. */}
+        {breakdown ? (
+          <button type="button" onClick={onToggle} className="pool-breakdown-toggle" aria-expanded={isOpen}>
+            <span>
+              <span className="text-white font-heading font-bold text-sm">
+                Draw #{row.drawingId.toString()}
+              </span>
+              <span className="pool-dimmer text-xs block">
+                {row.tickets.toString()} ticket{plural} {kind === "sponsor" ? "sponsored" : "in"}
+              </span>
+            </span>
+            <span className={`pool-breakdown-caret${isOpen ? " is-open" : ""}`} aria-hidden="true">
+              ▾
+            </span>
+          </button>
+        ) : (
+          <div>
+            <p className="text-white font-heading font-bold text-sm">
+              Draw #{row.drawingId.toString()}
+            </p>
+            <p className="pool-dimmer text-xs">
+              {row.tickets.toString()} ticket{plural} {kind === "sponsor" ? "sponsored" : "in"}
+            </p>
+          </div>
+        )}
+
+        {(() => {
+          switch (status.kind) {
+            case "settling":
+              return <span className="pool-dim text-xs font-heading font-bold">Settling…</span>;
+            case "pending":
+              return <span className="pool-dimmer text-xs">—</span>;
+            case "claimed":
+              return (
+                <span className="text-wins-green text-xs font-heading font-bold">✓ claimed</span>
+              );
+            case "claimable":
+              return (
+                <button
+                  onClick={onClaim}
+                  disabled={isClaiming}
+                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50 shrink-0"
+                >
+                  {isClaiming ? "Claiming…" : `Claim $${formatUnits(status.owed, USDC_DECIMALS)}`}
+                </button>
+              );
+            default:
+              /* Settled with nothing owed. For a joiner that means the pool's tickets did not
+                 win — say so plainly rather than showing a $0.00 claim button. For a sponsor it
+                 covers two on-chain-distinct cases this row cannot tell apart: other people
+                 joined and the sponsorship did its job, OR nobody joined and the ticket lost.
+                 "No win" is FALSE in the first case whenever the joiners won, and a sponsor must
+                 never be told they got nothing — so say only what the read proves. */
+              return (
+                <span className="pool-dimmer text-xs font-heading font-bold">
+                  {kind === "sponsor" ? "No sponsor payout this draw" : "No win this draw"}
+                </span>
+              );
+          }
+        })()}
+      </div>
+
+      {isOpen && breakdown && (
+        <div className="pool-breakdown">
+          <div className="pool-breakdown-line">
+            <span>Pool tickets</span>
+            <span>
+              {breakdown.poolTickets.toString()}
+              {breakdown.sponsoredTickets > BigInt(0) && (
+                <em> ({breakdown.sponsoredTickets.toString()} sponsored)</em>
+              )}
+            </span>
+          </div>
+          {/* The count comes from Megapot, the money from the chain. When the lookup fails the
+              count is dropped and the label changes — printing "0 winning tickets" above a real
+              pot would be a lie, and hiding the pot too would throw away a fact we do have. */}
+          <div className="pool-breakdown-line">
+            <span>{breakdown.winningTickets === null ? "Pool won" : "Winning tickets"}</span>
+            <span>
+              {breakdown.winningTickets !== null && <>{breakdown.winningTickets}</>}
+              <b>${formatUnits(row.pot, USDC_DECIMALS)}</b>
+            </span>
+          </div>
+          <div className="pool-breakdown-line is-total">
+            <span>Your share</span>
+            <span>
+              {breakdown.myTickets.toString()} of {breakdown.denominator.toString()}
+              <b>${formatUnits(breakdown.share, USDC_DECIMALS)}</b>
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Read ?tab from URL (must be in Suspense for Next.js 16) ─────────
@@ -975,6 +1183,9 @@ export default function Home() {
   const [yourSponsoredDrawings, setYourSponsoredDrawings] = useState<bigint[]>([]);
   const [poolClaimError, setPoolClaimError] = useState("");
   const [claimingDrawing, setClaimingDrawing] = useState<bigint | null>(null);
+  // Winning-ticket counts per drawing, and which past-draw row is expanded (one at a time).
+  const [poolWinCounts, setPoolWinCounts] = useState<Map<string, number> | null>(null);
+  const [openBreakdown, setOpenBreakdown] = useState<string | null>(null);
   // Set after a successful group claim, from `poolOf(drawingId)` — the pool's TOTAL pot and
   // headcount for that drawing, never the wallet's own share (which is all `shareOf` gives).
   // Feeds the "Share the group win" button; null hides it, same as the ticket-claim share path.
@@ -1386,10 +1597,15 @@ export default function Home() {
   }, [currentDrawingId, yourPoolDrawings, yourSponsoredDrawings]);
 
   // Three entries per drawing, one multicall. `shareOf` carries the user's joiner weight, what
-  // they are owed and whether they already claimed; `poolStateOf` gates whether either figure
-  // may be shown at all; `sponsorShareOf` carries the same triple for the zero-joiner sponsor
-  // fallback (Task 11B). Every index below MUST stay `i * 3` / `i * 3 + 1` / `i * 3 + 2` — an
-  // off-by-one here silently pairs one drawing's read with another's.
+  // they are owed and whether they already claimed; `poolOf` gates whether either figure may be
+  // shown at all AND feeds the expandable breakdown; `sponsorShareOf` carries the same triple
+  // for the zero-joiner sponsor fallback (Task 11B). Every index below MUST stay `i * 3` /
+  // `i * 3 + 1` / `i * 3 + 2` — an off-by-one here silently pairs one drawing's read with
+  // another's.
+  //
+  // The middle slot reads `poolOf`, not `poolStateOf`: it returns that same state as its
+  // fourth field plus the pot, the joiner weight and the ticket count the breakdown needs, so
+  // the panel costs no extra call. Do not "simplify" it back to `poolStateOf`.
   const { data: pastPoolReads, refetch: refetchPastPools } = useReadContracts({
     contracts: pastDrawingIds.flatMap((d) => [
       {
@@ -1401,7 +1617,7 @@ export default function Home() {
       {
         address: FARPOT_POOL_ADDRESS,
         abi: FARPOT_POOL_ABI,
-        functionName: "poolStateOf" as const,
+        functionName: "poolOf" as const,
         args: [d] as const,
       },
       {
@@ -1419,22 +1635,26 @@ export default function Home() {
 
   const myPastPools = useMemo(() => {
     if (!pastPoolReads) return [];
-    const out: {
-      drawingId: bigint;
-      tickets: bigint;
-      owed: bigint;
-      hasClaimed: boolean;
-      state: number;
-    }[] = [];
+    const out: PastPoolRow[] = [];
     pastDrawingIds.forEach((drawingId, i) => {
       const share = pastPoolReads[i * 3];
-      const state = pastPoolReads[i * 3 + 1];
+      const pool = pastPoolReads[i * 3 + 1];
       // A failed read is skipped rather than rendered as a zero — showing "you won $0" because
       // an RPC call failed is worse than showing nothing.
-      if (share?.status !== "success" || state?.status !== "success") return;
+      if (share?.status !== "success" || pool?.status !== "success") return;
       const [tickets, owed, hasClaimed] = share.result as readonly [bigint, bigint, boolean];
       if (tickets === BigInt(0)) return; // never joined this drawing
-      out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
+      const [totalTickets, , pot, state, , ticketCount] = pool.result as PoolOfResult;
+      out.push({
+        drawingId,
+        tickets,
+        owed,
+        hasClaimed,
+        state: Number(state),
+        totalTickets,
+        ticketCount,
+        pot,
+      });
     });
     return out;
   }, [pastPoolReads, pastDrawingIds]);
@@ -1446,20 +1666,14 @@ export default function Home() {
   // payouts for one drawing).
   const mySponsoredPools = useMemo(() => {
     if (!pastPoolReads) return [];
-    const out: {
-      drawingId: bigint;
-      tickets: bigint;
-      owed: bigint;
-      hasClaimed: boolean;
-      state: number;
-    }[] = [];
+    const out: PastPoolRow[] = [];
     pastDrawingIds.forEach((drawingId, i) => {
       const share = pastPoolReads[i * 3];
-      const state = pastPoolReads[i * 3 + 1];
+      const pool = pastPoolReads[i * 3 + 1];
       const sponsorShare = pastPoolReads[i * 3 + 2];
       if (
         share?.status !== "success" ||
-        state?.status !== "success" ||
+        pool?.status !== "success" ||
         sponsorShare?.status !== "success"
       )
         return;
@@ -1471,10 +1685,39 @@ export default function Home() {
         boolean,
       ];
       if (tickets === BigInt(0)) return; // never sponsored this drawing
-      out.push({ drawingId, tickets, owed, hasClaimed, state: Number(state.result) });
+      const [totalTickets, , pot, state, , ticketCount] = pool.result as PoolOfResult;
+      out.push({
+        drawingId,
+        tickets,
+        owed,
+        hasClaimed,
+        state: Number(state),
+        totalTickets,
+        ticketCount,
+        pot,
+      });
     });
     return out;
   }, [pastPoolReads, pastDrawingIds]);
+
+  // Winning-ticket counts for the rows on screen. Runs once the rows exist rather than on tab
+  // open, so the floor is the oldest drawing actually rendered and the fetch stops there.
+  // Deliberately NOT re-polled: a settled draw's results never change.
+  const oldestRenderedDrawing = useMemo(() => {
+    const ids = [...myPastPools, ...mySponsoredPools].map((p) => p.drawingId);
+    return ids.length === 0 ? null : ids.reduce((a, b) => (b < a ? b : a));
+  }, [myPastPools, mySponsoredPools]);
+
+  useEffect(() => {
+    if (activeTab !== "pool" || oldestRenderedDrawing === null) return;
+    let cancelled = false;
+    fetchPoolWinCounts(oldestRenderedDrawing).then((counts) => {
+      if (!cancelled) setPoolWinCounts(counts);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, oldestRenderedDrawing]);
 
   const handleClaimPool = useCallback(
     async (drawingId: bigint) => {
@@ -3530,59 +3773,20 @@ export default function Home() {
                   </h3>
                   <div className="space-y-2">
                     {myPastPools.map((p) => (
-                      <div
+                      <PastPoolRowCard
                         key={p.drawingId.toString()}
-                        className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
-                      >
-                        <div>
-                          <p className="text-white font-heading font-bold text-sm">
-                            Draw #{p.drawingId.toString()}
-                          </p>
-                          <p className="pool-dimmer text-xs">
-                            {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"} in
-                          </p>
-                        </div>
-
-                        {(() => {
-                          const row = poolRowState(p);
-                          switch (row.kind) {
-                            case "settling":
-                              return (
-                                <span className="pool-dim text-xs font-heading font-bold">
-                                  Settling…
-                                </span>
-                              );
-                            case "pending":
-                              return <span className="pool-dimmer text-xs">—</span>;
-                            case "claimed":
-                              return (
-                                <span className="text-wins-green text-xs font-heading font-bold">
-                                  ✓ claimed
-                                </span>
-                              );
-                            case "claimable":
-                              return (
-                                <button
-                                  onClick={() => handleClaimPool(p.drawingId)}
-                                  disabled={claimingDrawing === p.drawingId}
-                                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
-                                >
-                                  {claimingDrawing === p.drawingId
-                                    ? "Claiming…"
-                                    : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
-                                </button>
-                              );
-                            default:
-                              /* Settled with nothing owed: the pool's tickets did not win. Say
-                                 so plainly rather than showing a $0.00 claim button. */
-                              return (
-                                <span className="pool-dimmer text-xs font-heading font-bold">
-                                  No win this draw
-                                </span>
-                              );
-                          }
-                        })()}
-                      </div>
+                        row={p}
+                        kind="joiner"
+                        winningTickets={poolWinCounts?.get(p.drawingId.toString()) ?? null}
+                        isOpen={openBreakdown === `joiner-${p.drawingId}`}
+                        onToggle={() =>
+                          setOpenBreakdown((cur) =>
+                            cur === `joiner-${p.drawingId}` ? null : `joiner-${p.drawingId}`,
+                          )
+                        }
+                        onClaim={() => handleClaimPool(p.drawingId)}
+                        isClaiming={claimingDrawing === p.drawingId}
+                      />
                     ))}
                   </div>
                 </div>
@@ -3595,68 +3799,20 @@ export default function Home() {
                   </h3>
                   <div className="space-y-2">
                     {mySponsoredPools.map((p) => (
-                      <div
+                      <PastPoolRowCard
                         key={p.drawingId.toString()}
-                        className="rounded-xl p-4 bg-white/5 flex items-center justify-between gap-3"
-                      >
-                        <div>
-                          <p className="text-white font-heading font-bold text-sm">
-                            Draw #{p.drawingId.toString()}
-                          </p>
-                          <p className="pool-dimmer text-xs">
-                            {p.tickets.toString()} ticket{p.tickets === BigInt(1) ? "" : "s"}{" "}
-                            sponsored
-                          </p>
-                        </div>
-
-                        {(() => {
-                          const row = poolRowState(p);
-                          switch (row.kind) {
-                            case "settling":
-                              return (
-                                <span className="pool-dim text-xs font-heading font-bold">
-                                  Settling…
-                                </span>
-                              );
-                            case "pending":
-                              return <span className="pool-dimmer text-xs">—</span>;
-                            case "claimed":
-                              return (
-                                <span className="text-wins-green text-xs font-heading font-bold">
-                                  ✓ claimed
-                                </span>
-                              );
-                            case "claimable":
-                              return (
-                                <button
-                                  onClick={() => handleClaimPool(p.drawingId)}
-                                  disabled={claimingDrawing === p.drawingId}
-                                  className="px-4 py-2 rounded-lg bg-gold text-navy font-heading font-extrabold text-xs disabled:opacity-50"
-                                >
-                                  {claimingDrawing === p.drawingId
-                                    ? "Claiming…"
-                                    : `Claim $${formatUnits(row.owed, USDC_DECIMALS)}`}
-                                </button>
-                              );
-                            default:
-                              /* Settled with nothing owed via the sponsor class. This covers
-                                 two on-chain-distinct cases the row cannot tell apart without
-                                 reading poolOf(drawingId).tickets (deliberately out of scope —
-                                 see the Task 11B review): other people joined and the
-                                 sponsorship did its job (whether or not their ticket won), OR
-                                 nobody joined and the group's ticket genuinely lost. "No win
-                                 this draw" is FALSE in the first case whenever the joiners won,
-                                 and contradicts the standing rule below (a sponsor must never
-                                 be told they got nothing) — say only what this read proves: no
-                                 payout via the sponsor class. */
-                              return (
-                                <span className="pool-dimmer text-xs font-heading font-bold">
-                                  No sponsor payout this draw
-                                </span>
-                              );
-                          }
-                        })()}
-                      </div>
+                        row={p}
+                        kind="sponsor"
+                        winningTickets={poolWinCounts?.get(p.drawingId.toString()) ?? null}
+                        isOpen={openBreakdown === `sponsor-${p.drawingId}`}
+                        onToggle={() =>
+                          setOpenBreakdown((cur) =>
+                            cur === `sponsor-${p.drawingId}` ? null : `sponsor-${p.drawingId}`,
+                          )
+                        }
+                        onClaim={() => handleClaimPool(p.drawingId)}
+                        isClaiming={claimingDrawing === p.drawingId}
+                      />
                     ))}
                   </div>
                 </div>

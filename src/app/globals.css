@@ -897,3 +897,92 @@ body {
 }
 /* The note is gold-on-night; on a light card it needs a readable ink. */
 .jackpot-final-hour .golden-hour-note { color: #b3560c; }
+
+/* ── Past-draw breakdown ─────────────────────────────────────────────
+   The ledger under a settled group-buy row: what the pool bought, what it won, and how that
+   divided down to this wallet. Three label/value lines, no prose — the numbers read straight
+   down the right edge, so the arithmetic is checkable at a glance.
+
+   Colours follow the pool tab's own convention: dark ink by default, inverted under
+   `[data-theme="midnight"] .app-shell`. Do NOT hardcode white here — the Pool tab renders on a
+   cream page in the default theme and white-on-cream is invisible. */
+.pool-breakdown-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+}
+.pool-breakdown-caret {
+  font-size: 0.7rem;
+  color: rgba(52, 32, 79, 0.55);
+  transition: transform 150ms ease;
+}
+.pool-breakdown-caret.is-open {
+  transform: rotate(180deg);
+}
+.pool-breakdown {
+  border-top: 1px solid rgba(52, 32, 79, 0.12);
+  padding: 0.75rem 1rem 1rem;
+  display: grid;
+  gap: 0.4rem;
+}
+.pool-breakdown-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.75rem;
+  color: rgba(52, 32, 79, 0.66);
+}
+.pool-breakdown-line > span:last-child {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  color: rgba(52, 32, 79, 0.9);
+  /* Tabular figures so the amounts line up digit-for-digit down the column — the whole point
+     of the panel is that the numbers can be checked against each other at a glance. */
+  font-variant-numeric: tabular-nums;
+}
+.pool-breakdown-line em {
+  font-style: normal;
+  color: rgba(52, 32, 79, 0.5);
+}
+.pool-breakdown-line b {
+  min-width: 4.5rem;
+  text-align: right;
+  font-weight: 700;
+  color: rgba(52, 32, 79, 0.95);
+}
+/* The line the user actually cares about — their own cut. */
+.pool-breakdown-line.is-total {
+  border-top: 1px solid rgba(52, 32, 79, 0.12);
+  padding-top: 0.5rem;
+  margin-top: 0.15rem;
+}
+/* Gold ink, not the gold FILL — #f5c451 text on cream fails contrast. This is the same
+   darkened gold the winners ticker uses for handles on the light ground. */
+.pool-breakdown-line.is-total b {
+  color: #8a6206;
+}
+
+[data-theme="midnight"] .app-shell .pool-breakdown-caret { color: rgba(255, 255, 255, .45); }
+[data-theme="midnight"] .app-shell .pool-breakdown,
+[data-theme="midnight"] .app-shell .pool-breakdown-line.is-total {
+  border-top-color: rgba(255, 255, 255, .08);
+}
+[data-theme="midnight"] .app-shell .pool-breakdown-line { color: rgba(255, 255, 255, .55); }
+[data-theme="midnight"] .app-shell .pool-breakdown-line > span:last-child { color: rgba(255, 255, 255, .85); }
+[data-theme="midnight"] .app-shell .pool-breakdown-line em { color: rgba(255, 255, 255, .45); }
+[data-theme="midnight"] .app-shell .pool-breakdown-line b { color: #fff; }
+[data-theme="midnight"] .app-shell .pool-breakdown-line.is-total b { color: #f5c451; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pool-breakdown-caret {
+    transition: none;
+  }
+}
