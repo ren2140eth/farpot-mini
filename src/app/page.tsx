@@ -479,8 +479,14 @@ function PastPoolRowCard({
                 {row.tickets.toString()} ticket{plural} {kind === "sponsor" ? "sponsored" : "in"}
               </span>
             </span>
+            {/* Inline SVG, not a font glyph: the platform fallback font decides a glyph's weight
+                and baseline, and the old down-triangle came out heavy on one OS and hairline on
+                another. `currentColor` keeps it on the CSS theme rules rather than a second
+                palette here. */}
             <span className={`pool-breakdown-caret${isOpen ? " is-open" : ""}`} aria-hidden="true">
-              ▾
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 4.5 6 8l3.5-3.5" />
+              </svg>
             </span>
           </button>
         ) : (

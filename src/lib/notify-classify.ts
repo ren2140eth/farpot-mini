@@ -50,6 +50,77 @@ export function classify(
   return addresses.some((a) => roster.has(a.toLowerCase())) ? "player" : "non-player";
 }
 
+/**
+ * Does this wallet have a stake in what the POOL's tickets did in `drawingId`?
+ *
+ * The gap this closes: the pool contract OWNS every ticket it buys, so Megapot's round roster
+ * lists the POOL's address, never the people in it. A wallet whose only play that day was
+ * joining a group buy therefore read as a non-player, got the "you haven't played" nudge
+ * instead of its results, and was never told that a share of a real pot was sitting unclaimed
+ * behind a `claim()` it has to send itself.
+ *
+ * Pure, and fed entirely from contract reads, so the rule can be asserted without a chain:
+ *
+ *   • `ticketCount === 0` — the pool bought nothing for this drawing. There is no outcome to
+ *     report, whatever anyone's book-keeping says, so nobody is a participant.
+ *   • `myJoined > 0` — a joiner is paid pro-rata out of the pot whenever the pool wins.
+ *     Always a participant.
+ *   • `mySponsored > 0` — a sponsor takes NO payout weight and is paid only in the zero-joiner
+ *     fallback, which is why `joinerWeight === 0` gates it. The gate mirrors `sponsorShareOf`
+ *     exactly. Without it, every sponsor of a draw other people joined would be told to go and
+ *     see if they won, when the contract owes them nothing and the row will say so.
+ */
+export function poolParticipation(params: {
+  /** `poolOf.tickets` — joiner weight for the whole drawing, excluding sponsored tickets. */
+  joinerWeight: bigint;
+  /** `poolOf.ticketCount` — every ticket the pool bought, joined and sponsored alike. */
+  ticketCount: bigint;
+  /** `shareOf(drawingId, who).tickets`. */
+  myJoined: bigint;
+  /** `sponsoredByUser(drawingId, who)`. */
+  mySponsored: bigint;
+}): boolean {
+  const { joinerWeight, ticketCount, myJoined, mySponsored } = params;
+  if (ticketCount === BigInt(0)) return false;
+  if (myJoined > BigInt(0)) return true;
+  return mySponsored > BigInt(0) && joinerWeight === BigInt(0);
+}
+
+/** Which of the two ways of playing put this subscriber in the results segment. */
+export type PlayerRoute = "tickets" | "pool";
+
+export type SegmentResult =
+  | { segment: "unknown" }
+  | { segment: "non-player" }
+  | { segment: "player"; via: PlayerRoute };
+
+/**
+ * `classify`, widened to count a group buy as playing.
+ *
+ * `poolRoster` holds the subscriber addresses that `poolParticipation` accepted for this
+ * drawing. It is deliberately a SECOND set rather than being unioned into `roster` upstream,
+ * because the two routes land in different places: someone holding their own ticket is sent to
+ * Results, where that ticket is; someone whose only stake is the group buy is sent to Pool,
+ * where their claim is. Unioning would send the pool-only cohort to an empty ticket list —
+ * a notification that says "tap to see if you won" and then shows nothing.
+ *
+ * Direct tickets win the tie. A subscriber in BOTH is sent to Results, which is the tab that
+ * would otherwise be unreachable from the notification; the pool claim still announces itself
+ * through the Pool tab's own nav badge.
+ */
+export function classifyWithPool(
+  addresses: string[] | null,
+  roster: ReadonlySet<string>,
+  poolRoster: ReadonlySet<string>,
+): SegmentResult {
+  if (addresses === null) return { segment: "unknown" };
+  if (addresses.length === 0) return { segment: "non-player" };
+  const lower = addresses.map((a) => a.toLowerCase());
+  if (lower.some((a) => roster.has(a))) return { segment: "player", via: "tickets" };
+  if (lower.some((a) => poolRoster.has(a))) return { segment: "player", via: "pool" };
+  return { segment: "non-player" };
+}
+
 export type NudgeDecision =
   | { send: false; reason: "ladder-exhausted" }
   | { send: true; ttlSeconds: number };

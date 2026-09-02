@@ -10,6 +10,12 @@
 // Segmentation needs an address; the webhook only ever stores a fid. So the chain is
 // fid → verified ETH address (Neynar) → did that address hold a ticket in the round (Megapot).
 //
+// TWO ways of playing, not one. Megapot's roster answers only "did this wallet hold a ticket",
+// and the pool contract OWNS the tickets it buys — so the roster lists the POOL and never the
+// people in it, and a group-buy joiner read as a non-player. `notify-pool.ts` answers the
+// second question straight from the chain; `classifyWithPool` combines the two, keeping the
+// routes distinct so each cohort lands on the tab where its own money is.
+//
 // THREE outcomes, not two. "Neynar says this fid has no verified address" and "the Neynar
 // call failed" arrive at the same call site and mean opposite things:
 //   • no verified address → they could not plausibly have bought → non-player
@@ -26,8 +32,15 @@ import { getCachedAddresses, setCachedAddresses } from "./notifications";
 
 import { roundPlayersUrl, parsePlayersPage, type PlayersPage } from "./notify-classify";
 
-export { classify, nudgeDecision, NUDGE_WAITS_SECONDS, MAX_NUDGES } from "./notify-classify";
-export type { SubscriberSegment, NudgeDecision } from "./notify-classify";
+export {
+  classify,
+  classifyWithPool,
+  poolParticipation,
+  nudgeDecision,
+  NUDGE_WAITS_SECONDS,
+  MAX_NUDGES,
+} from "./notify-classify";
+export type { SubscriberSegment, SegmentResult, PlayerRoute, NudgeDecision } from "./notify-classify";
 
 const PLAYERS_PAGE_LIMIT = 100;
 // 50 pages × 100 = 5,000 players. A real round is a few hundred (round 149: 382), so the cap

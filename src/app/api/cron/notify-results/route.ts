@@ -3,7 +3,8 @@
 //   1. POOL OPERATIONS (plan Phase 9) — crank `FarpotPool.claimBatch` for every settled drawing
 //      that still owes claims, and run the §8.1 staleness monitor. This is the money path: until
 //      it runs, a settled pool's winnings sit uncollected on Megapot.
-//   2. Post-draw notifications — tell players to check their results.
+//   2. Post-draw notifications — tell players to check their results. "Player" means either
+//      route: holding your own ticket, or having a stake in what the pool's tickets did.
 //
 // The order is load-bearing. Notifications are sent sequentially against Farcaster's
 // 1-per-30s-per-token rate limit, so a backlog of missed rounds can legitimately consume the
@@ -45,9 +46,10 @@ import {
 import {
   fetchRoundPlayers,
   loadAddressesForFids,
-  classify,
+  classifyWithPool,
   nudgeDecision,
 } from "@/lib/notify-segments";
+import { fetchPoolParticipants } from "@/lib/notify-pool";
 import { runCrank, runStalenessMonitor } from "@/lib/pool-ops";
 
 export const runtime = "nodejs";
@@ -226,7 +228,22 @@ export async function GET(req: Request) {
   // every single day.
   const notifiedFids = new Set<number>();
   const unknownFids = new Set<number>();
-  const allResults: Array<{ round: string; recipients: number; result: unknown }> = [];
+  const allResults: Array<{
+    round: string;
+    recipients: number;
+    viaTickets: number;
+    viaPool: number;
+    result: unknown;
+  }> = [];
+
+  // Every verified address we know about, deduped and lowercased — the candidate list the pool
+  // lookup tests against. Built once, outside the round loop: it is the same set for every
+  // round, and rebuilding it per round would multiply the multicall size for nothing.
+  const candidateAddresses = [
+    ...new Set(
+      subscribers.flatMap((s) => (addressesByFid.get(s.fid) ?? []).map((a) => a.toLowerCase())),
+    ),
+  ];
 
   for (const round of roundsToNotify) {
     const roster = await fetchRoundPlayers(round);
@@ -244,46 +261,96 @@ export async function GET(req: Request) {
       );
     }
 
-    const players: SubscriberToken[] = [];
+    // The second way of playing. Megapot's roster lists the POOL as the ticket holder, never
+    // the people in it, so without this a group-buy joiner reads as someone who has not played.
+    const poolRoster = await fetchPoolParticipants(publicClient, round, candidateAddresses);
+    if (poolRoster === null) {
+      // Parked for exactly the reason a missing Megapot roster is: the addresses this lookup
+      // failed to confirm are the group-buy participants, and letting the marker advance past
+      // the round would not merely delay their notification, it would drop it — permanently,
+      // for the one cohort holding an unclaimed share that only they can `claim()`. Direct
+      // ticket holders are delayed a tick rather than skipped, which is the cheaper mistake.
+      console.error("[cron:notify] pool lookup failed for round", round.toString(), "— parking marker here");
+      if (!dryRun) await setDrawMarker(round);
+      return respond(
+        { ok: false, error: "pool_unavailable", round: round.toString(), rounds: roundsToNotify.map(String) },
+        503,
+      );
+    }
+
+    // Split by ROUTE, not merged, because the two cohorts need different landing tabs — a
+    // pool-only participant sent to Results reads "tap to see if you won" and then finds an
+    // empty ticket list, because the tickets belong to the pool. See `classifyWithPool`.
+    const ticketPlayers: SubscriberToken[] = [];
+    const poolPlayers: SubscriberToken[] = [];
     for (const sub of subscribers) {
-      const segment = classify(addressesByFid.get(sub.fid) ?? null, roster);
-      if (segment === "unknown") {
+      const result = classifyWithPool(addressesByFid.get(sub.fid) ?? null, roster, poolRoster);
+      if (result.segment === "unknown") {
         unknownFids.add(sub.fid);
         continue;
       }
-      if (segment === "player") players.push(sub);
+      if (result.segment !== "player") continue;
+      (result.via === "tickets" ? ticketPlayers : poolPlayers).push(sub);
     }
+    const players = [...ticketPlayers, ...poolPlayers];
 
     console.log(
       "[cron:notify] round", round.toString(),
       "roster", roster.size,
+      "pool", poolRoster.size,
       "players", players.length,
+      "(tickets", ticketPlayers.length, "pool-only", poolPlayers.length, ")",
       "unknown", unknownFids.size,
     );
 
     if (players.length === 0) {
-      allResults.push({ round: round.toString(), recipients: 0, result: [] });
+      allResults.push({ round: round.toString(), recipients: 0, viaTickets: 0, viaPool: 0, result: [] });
       continue;
     }
 
     for (const p of players) notifiedFids.add(p.fid);
     if (dryRun) {
-      allResults.push({ round: round.toString(), recipients: players.length, result: "dry-run" });
+      allResults.push({
+        round: round.toString(),
+        recipients: players.length,
+        viaTickets: ticketPlayers.length,
+        viaPool: poolPlayers.length,
+        result: "dry-run",
+      });
       continue;
     }
 
     // Playing graduates someone back to the results path and rewinds the nudge ladder, so a
-    // lapse after real engagement starts again at the shortest rung.
+    // lapse after real engagement starts again at the shortest rung. Joining a group buy is
+    // playing, so the pool cohort resets too.
     for (const p of players) await resetNudgeState(p.fid);
 
-    const result = await sendNotifications({
-      notificationId: `draw-${round}`,
-      title: "🎰 The draw is in!",
-      body: `Round #${round} results are live — tap to see if you won.`,
-      targetUrl: `${APP_URL}/?tab=results&n=results`,
-      tokens: players,
+    // Same title and body for both cohorts — one notification, as far as anyone receiving it is
+    // concerned. Only `targetUrl` differs, and the two token lists are disjoint by construction,
+    // so reusing the `draw-<round>` id cannot deliver twice: the id dedupes per token.
+    const sends: unknown[] = [];
+    for (const [tokens, tab] of [
+      [ticketPlayers, "results"],
+      [poolPlayers, "pool"],
+    ] as const) {
+      if (tokens.length === 0) continue;
+      sends.push(
+        await sendNotifications({
+          notificationId: `draw-${round}`,
+          title: "🎰 The draw is in!",
+          body: `Round #${round} results are live — tap to see if you won.`,
+          targetUrl: `${APP_URL}/?tab=${tab}&n=results`,
+          tokens,
+        }),
+      );
+    }
+    allResults.push({
+      round: round.toString(),
+      recipients: players.length,
+      viaTickets: ticketPlayers.length,
+      viaPool: poolPlayers.length,
+      result: sends,
     });
-    allResults.push({ round: round.toString(), recipients: players.length, result });
   }
 
   // ── Pass 2: jackpot status, to everyone who did NOT just get results ────────────────
