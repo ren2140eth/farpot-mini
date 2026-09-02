@@ -917,13 +917,47 @@ body {
   color: inherit;
   cursor: pointer;
 }
+/* The caret is a CONTROL, not a decoration, and it has to read as one at arm's length on a
+   phone. The first version was a 0.7rem down-triangle glyph at 55% ink: about 11px of low-contrast
+   text with no hit target, which is why a row that expands looked like a row that does not.
+
+   Three changes carry that: a tinted 1.5rem chip so the affordance has an edge; an inline SVG
+   chevron rather than a font glyph (a glyph's weight and baseline are whatever the platform's
+   fallback font decides, and the triangle renders as a heavy filled triangle on some Androids and a
+   hairline on iOS); and full-strength ink, since the caret is the only thing on the row telling
+   you there is more underneath.
+
+   The chip stays a fixed square via flex-basis, NOT width alone — it sits in a flex row next to
+   a text block that can wrap to two lines, and a bare width would let it squash. */
 .pool-breakdown-caret {
-  font-size: 0.7rem;
-  color: rgba(52, 32, 79, 0.55);
-  transition: transform 150ms ease;
+  flex: 0 0 1.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(52, 32, 79, 0.08);
+  color: rgba(52, 32, 79, 0.85);
+  transition: transform 150ms ease, background-color 150ms ease;
+}
+.pool-breakdown-caret svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  display: block;
 }
 .pool-breakdown-caret.is-open {
   transform: rotate(180deg);
+  background: rgba(52, 32, 79, 0.14);
+}
+/* Hover is a nicety; :active is the one that matters, because a phone has no hover and a tap
+   with no feedback reads as a tap that did not land. */
+.pool-breakdown-toggle:hover .pool-breakdown-caret { background: rgba(52, 32, 79, 0.14); }
+.pool-breakdown-toggle:active .pool-breakdown-caret { background: rgba(52, 32, 79, 0.2); }
+.pool-breakdown-toggle:focus-visible {
+  outline: 2px solid rgba(245, 196, 81, 0.9);
+  outline-offset: 3px;
+  border-radius: 0.5rem;
 }
 .pool-breakdown {
   border-top: 1px solid rgba(52, 32, 79, 0.12);
@@ -970,7 +1004,17 @@ body {
   color: #8a6206;
 }
 
-[data-theme="midnight"] .app-shell .pool-breakdown-caret { color: rgba(255, 255, 255, .45); }
+[data-theme="midnight"] .app-shell .pool-breakdown-caret {
+  background: rgba(255, 255, 255, .1);
+  color: rgba(255, 255, 255, .9);
+}
+[data-theme="midnight"] .app-shell .pool-breakdown-caret.is-open,
+[data-theme="midnight"] .app-shell .pool-breakdown-toggle:hover .pool-breakdown-caret {
+  background: rgba(255, 255, 255, .18);
+}
+[data-theme="midnight"] .app-shell .pool-breakdown-toggle:active .pool-breakdown-caret {
+  background: rgba(255, 255, 255, .26);
+}
 [data-theme="midnight"] .app-shell .pool-breakdown,
 [data-theme="midnight"] .app-shell .pool-breakdown-line.is-total {
   border-top-color: rgba(255, 255, 255, .08);
