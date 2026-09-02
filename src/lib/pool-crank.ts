@@ -295,6 +295,15 @@ async function crankDrawing(
         base.potDelta = potDelta.toString();
         return base;
       }
+      // Same shape as `underfunded`, and for the same reason: the failure says nothing about
+      // this drawing, so it must leave no halt behind. `partial` stops the cursor here, which
+      // is what gets the drawing retried on the next tick rather than stepped over.
+      if (verdict === "transient") {
+        base.outcome = "partial";
+        base.reason = `claimBatch(${drawingId}, ${n}) hit a transient network/mempool failure: ${errText(err)}`;
+        base.potDelta = potDelta.toString();
+        return base;
+      }
       base.outcome = verdict === "resize" ? "terminal" : "fatal";
       base.reason = `claimBatch(${drawingId}, ${n}) could not be sent: ${errText(err)}`;
       base.potDelta = potDelta.toString();
