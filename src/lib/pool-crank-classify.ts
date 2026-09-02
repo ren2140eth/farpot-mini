@@ -12,6 +12,9 @@
 //   drained     → NothingToClaim. The cursor is already at the end; SUCCESS, not an error, and
 //                 the normal result of a second run over the same drawing.
 //   not-settled → NotSettled. The drawing has not rolled over yet. Try again later.
+//   underfunded → the keeper cannot pay. Transient; top it up. Never halts.
+//   transient   → a mempool or transport failure (underpriced, nonce, rate limit, dropped
+//                 socket). Nothing to do with this drawing; retry next tick. Never halts.
 //   fatal       → anything else. Alert and stop. Do NOT retry.
 //
 // Design round 5 finding 3 rejected "halve on any failure": a deterministic revert is usually
@@ -25,7 +28,13 @@ import {
 } from "viem";
 
 /** How a failed `claimBatch` attempt should be handled. */
-export type CrankVerdict = "resize" | "not-settled" | "drained" | "fatal" | "underfunded";
+export type CrankVerdict =
+  | "resize"
+  | "not-settled"
+  | "drained"
+  | "fatal"
+  | "underfunded"
+  | "transient";
 
 // An out-of-gas keeper is NOT one of design §4's four buckets, and conflating it with them is a
 // real defect rather than a tidiness point: "fatal" records a permanent halt, so a wallet that
@@ -33,6 +42,47 @@ export type CrankVerdict = "resize" | "not-settled" | "drained" | "fatal" | "und
 // It is transient — fix the balance and the next tick works — so it gets its own verdict and
 // never halts anything.
 const UNDERFUNDED_PATTERNS = ["insufficient funds", "exceeds the balance of the account"];
+
+// Conditions that are about the MEMPOOL or the NETWORK, never about this drawing.
+//
+// These cost real money in production. Drawing 156 was permanently halted by "replacement
+// transaction underpriced" — a same-nonce transaction was briefly pending at an equal or higher
+// fee — and the drawing then drained perfectly on a later run (verified on-chain: Settled,
+// cursor 1/1). The condition had already resolved itself, but the halt it recorded is forever,
+// because a halt has no expiry and nothing re-checks it.
+//
+// None of these reach `revertInfo` as a revert (`reverted: false`, `name: null`), match no size
+// or funding pattern, and so fell through to the `fatal` default at the bottom of the
+// classifier — the branch whose comment says "anything else. Alert and stop." That default is
+// right for a deterministic revert and exactly wrong here: retrying is not merely safe, it is
+// the fix, and `crankDrawing` re-reads `poolOf` before every attempt so a retry can never
+// double-claim.
+//
+// "underpriced" covers both the bare and the "replacement transaction" forms. The RPC-transport
+// entries matter just as much: a rate limit or a dropped socket mid-send would otherwise halt a
+// drawing permanently over a blip that clears in seconds.
+export const TRANSIENT_PATTERNS = [
+  // mempool / nonce
+  "underpriced",
+  "nonce too low",
+  "nonce too high",
+  "already known",
+  "already imported",
+  "txpool is full",
+  "future transaction",
+  "max fee per gas less than block base fee",
+  // transport
+  "rate limit",
+  "timeout",
+  "timed out",
+  "socket hang up",
+  "econnreset",
+  "econnrefused",
+  "fetch failed",
+  "service unavailable",
+  "bad gateway",
+  "internal error",
+];
 
 // Substrings that mean "this call did not fit", in the several dialects the stack speaks:
 // viem's own error copy, geth/reth's JSON-RPC strings, and anvil's EVM errors. Every entry is
@@ -123,6 +173,11 @@ export function classifyCrankError(err: unknown): CrankVerdict {
   // Before the size patterns: an underfunded send mentions gas costs and would otherwise be
   // halved pointlessly down to a batch of one that is just as unaffordable.
   if (UNDERFUNDED_PATTERNS.some((p) => text.includes(p))) return "underfunded";
+  // Before the size patterns, and before the `fatal` default at the bottom: a mempool or
+  // transport failure is not a property of this drawing and must never record a permanent halt.
+  // It sits after the NAMED-error switch above, so a contract that told us exactly what was
+  // wrong still wins — a revert is never reinterpreted as a network blip.
+  if (TRANSIENT_PATTERNS.some((p) => text.includes(p))) return "transient";
   if (SIZE_FAILURE_PATTERNS.some((p) => text.includes(p))) return "resize";
 
   // A revert that decoded to NOTHING — no custom error, no reason string — is treated as a size
