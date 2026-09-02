@@ -54,6 +54,10 @@ CLAUDE.md
 /specs/
 NOTES.md
 TODO.md
+# Playwright/browser-automation scratch: screenshots, console logs and page snapshots dropped
+# by the MCP browser tools during UI verification. Working material, never prod code — and it
+# has been sitting untracked in `git status` where a careless `git add` could sweep it in.
+/.playwright-mcp/
 
 # typescript
 *.tsbuildinfo
