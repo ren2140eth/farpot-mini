@@ -19,6 +19,7 @@ import {
   cacheEnabled,
   clearCrankFailStreak,
   getCrankCursor,
+  clearHalt,
   getHalt,
   getLastSeenDrawingId,
   listHalts,
@@ -260,6 +261,44 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
       const seen = new Set(report.drawings.map((d) => d.drawingId));
       for (const halted of await listHalts()) {
         if (seen.has(halted.toString())) continue;
+
+        // Is it STILL stuck? The alert below asserts that winnings are uncollected, and until
+        // now nothing ever checked. A halt was write-only, so a drawing halted by a condition
+        // that later resolved — a transient mempool failure, or somebody else's permissionless
+        // `claimBatch` finishing the job — stayed in the set forever and re-raised `crank-fatal`
+        // every time the weekly dedupe expired, about money that was already collected.
+        //
+        // `poolOf` is authoritative: a drained cursor means there is nothing left to claim for
+        // this drawing, whatever the halt record says. Verified in production on drawing 156 —
+        // Settled, cursor 1/1, pot $0, and still paging weekly.
+        //
+        // A FAILED read is not a clear. "I could not check" is not "it is fine", so the drawing
+        // is re-surfaced exactly as before and re-checked next tick.
+        let drained: boolean | null = null;
+        try {
+          const pool = (await publicClient.readContract({
+            address: FARPOT_POOL_ADDRESS,
+            abi: FARPOT_POOL_ABI,
+            functionName: "poolOf",
+            args: [halted],
+          })) as readonly [bigint, bigint, bigint, number, bigint, bigint];
+          // Positional: `poolOf` declares six flat outputs, so viem returns an array.
+          // Slot 4 is the claim cursor, slot 5 the drawing's ticket count.
+          drained = pool[5] === BigInt(0) || pool[4] >= pool[5];
+        } catch (err) {
+          console.error(`[cron:crank] could not verify halted drawing ${halted}:`, err);
+        }
+
+        if (drained) {
+          // Clearing is what stops the false weekly page. Failing to clear is not worth failing
+          // the run over — the drawing is simply re-checked and re-cleared next tick.
+          await clearHalt(halted).catch((err) =>
+            console.error(`[cron:crank] could not clear resolved halt ${halted}:`, err),
+          );
+          console.log(`[cron:crank] halt on drawing ${halted} resolved — fully claimed, cleared`);
+          continue;
+        }
+
         const record = await getHalt(halted);
         report.drawings.push({
           drawingId: halted.toString(),
@@ -276,7 +315,10 @@ export async function runCrank(currentDrawingId: bigint): Promise<CrankOutcome> 
         report.alerts.push({
           kind: record?.kind ?? "crank-fatal",
           key: `drawing-${halted}`,
-          message: `drawing ${halted} is still halted and its winnings are still uncollected`,
+          message:
+            drained === null
+              ? `drawing ${halted} is halted and could not be verified this run — its winnings may still be uncollected`
+              : `drawing ${halted} is still halted and its winnings are still uncollected`,
           detail: record?.reason,
         });
       }

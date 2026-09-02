@@ -336,6 +336,29 @@ function tryParse(raw: string): unknown {
   }
 }
 
+/**
+ * Forget a halt, because the drawing it described is provably no longer stuck.
+ *
+ * A halt had no way out before this existed: `recordHalt` was write-only, so a drawing halted by
+ * a condition that later resolved itself stayed in the set forever, was re-reported on every
+ * single run, and re-raised its alert every time the weekly dedupe expired — with the message
+ * "its winnings are still uncollected", which by then was simply false. Drawing 156 is the live
+ * case: halted by a transient mempool error, drained on a later run, still paging.
+ *
+ * The caller must only call this having READ the chain and found the drawing drained; see
+ * `pool-ops.ts`. Never clear on a failed read — "I could not check" is not "it is fine".
+ *
+ * Write order is the mirror of `recordHalt`: detail first, set membership LAST. A crash between
+ * them leaves the drawing still enumerable by `listHalts` with a missing detail, which degrades
+ * to a vague-but-visible halt. The other order would drop it from the set while the detail key
+ * lingered — invisible, which is the one outcome the halt set exists to prevent.
+ */
+export async function clearHalt(drawingId: bigint): Promise<void> {
+  if (!cacheEnabled) return;
+  await client().del(haltKey(drawingId));
+  await client().srem(HALT_SET_KEY, drawingId.toString());
+}
+
 /** Every drawing currently halted, so a jam stays reported after the cursor has moved past it. */
 export async function listHalts(): Promise<bigint[]> {
   const raw = (await client().smembers<string[]>(HALT_SET_KEY)) ?? [];
